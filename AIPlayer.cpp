@@ -1,4 +1,6 @@
 #include "AIPlayer.h"
+#include "OpeningBook.h"
+#include "TacticalRules.h"
 
 #include <algorithm>
 #include <cmath>
@@ -6,6 +8,9 @@
 #include <utility>
 
 namespace {
+
+int countPiecesBetween(const ChessBoard& board, int sx, int sy, int ex, int ey);
+bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType side, int phase);
 
 int clampInt(int value, int low, int high) {
     return std::max(low, std::min(high, value));
@@ -43,6 +48,36 @@ int initialCannonRank(colorType side) {
     return side == RED ? 2 : 7;
 }
 
+int initialPawnRank(colorType side) {
+    return side == RED ? 3 : 6;
+}
+
+bool isInitialRookSquare(colorType side, int x, int y) {
+    return y == homeRank(side) && (x == 0 || x == 8);
+}
+
+bool isInitialKnightSquare(colorType side, int x, int y) {
+    return y == homeRank(side) && (x == 1 || x == 7);
+}
+
+bool isNormalKnightSquare(colorType side, int x, int y) {
+    return advanceOf(side, y) == 2 && (x == 2 || x == 6);
+}
+
+int flankIndexFromFile(int x) {
+    if (x <= 3) {
+        return 0;
+    }
+    if (x >= 5) {
+        return 1;
+    }
+    return -1;
+}
+
+bool onFlank(int x, int flank) {
+    return flank == 0 ? (x <= 3) : (x >= 5);
+}
+
 bool isDevelopedRook(colorType side, int x, int y) {
     return advanceOf(side, y) >= 2 || x == 3 || x == 4 || x == 5;
 }
@@ -55,6 +90,368 @@ bool isDevelopedKnight(colorType side, int x, int y) {
 bool isDevelopedCannon(colorType side, int x, int y) {
     const int cannonRow = initialCannonRank(side);
     return !(y == cannonRow && (x == 1 || x == 7));
+}
+
+int countKnightJumpOptions(const ChessBoard& board, colorType side, int x, int y) {
+    int jumps = 0;
+    for (int d = 0; d < 8; ++d) {
+        const int tx = x + dx_knight[d];
+        const int ty = y + dy_knight[d];
+        if (!ChessBoard::inBoard(tx, ty)) {
+            continue;
+        }
+        const int footX = x + dx_knight_foot[d];
+        const int footY = y + dy_knight_foot[d];
+        if (board.getGridAt(footX, footY).color != EMPTY) {
+            continue;
+        }
+        if (board.getGridAt(tx, ty).color == side) {
+            continue;
+        }
+        ++jumps;
+    }
+    return jumps;
+}
+
+int countKnightForwardJumps(const ChessBoard& board, colorType side, int x, int y) {
+    int jumps = 0;
+    const int sourceAdvance = advanceOf(side, y);
+    for (int d = 0; d < 8; ++d) {
+        const int tx = x + dx_knight[d];
+        const int ty = y + dy_knight[d];
+        if (!ChessBoard::inBoard(tx, ty)) {
+            continue;
+        }
+        const int footX = x + dx_knight_foot[d];
+        const int footY = y + dy_knight_foot[d];
+        if (board.getGridAt(footX, footY).color != EMPTY) {
+            continue;
+        }
+        if (board.getGridAt(tx, ty).color == side) {
+            continue;
+        }
+        if (advanceOf(side, ty) > sourceAdvance) {
+            ++jumps;
+        }
+    }
+    return jumps;
+}
+
+int countKnightBlockedLegs(const ChessBoard& board, int x, int y) {
+    int blocked = 0;
+    if (ChessBoard::inBoard(x - 1, y) && board.getGridAt(x - 1, y).color != EMPTY) {
+        ++blocked;
+    }
+    if (ChessBoard::inBoard(x + 1, y) && board.getGridAt(x + 1, y).color != EMPTY) {
+        ++blocked;
+    }
+    if (ChessBoard::inBoard(x, y - 1) && board.getGridAt(x, y - 1).color != EMPTY) {
+        ++blocked;
+    }
+    if (ChessBoard::inBoard(x, y + 1) && board.getGridAt(x, y + 1).color != EMPTY) {
+        ++blocked;
+    }
+    return blocked;
+}
+
+int flankPawnAdvanceSteps(const ChessBoard& board, colorType side, int fileX) {
+    const int startAdvance = advanceOf(side, initialPawnRank(side));
+    int bestAdvance = startAdvance;
+    for (int y = 0; y < BOARDHEIGHT; ++y) {
+        const Grid g = board.getGridAt(fileX, y);
+        if (g.color == side && g.type == Pawn) {
+            bestAdvance = std::max(bestAdvance, advanceOf(side, y));
+        }
+    }
+    return std::max(0, bestAdvance - startAdvance);
+}
+
+bool flankPawnAdvanced(const ChessBoard& board, colorType side, int fileX) {
+    return flankPawnAdvanceSteps(board, side, fileX) >= 1;
+}
+
+bool flankPawnActivatesKnight(const ChessBoard& board, colorType side, int knightX, int knightY, int pawnFileX) {
+    if (!isNormalKnightSquare(side, knightX, knightY)) {
+        return false;
+    }
+    if (!flankPawnAdvanced(board, side, pawnFileX)) {
+        return false;
+    }
+    const int jumpCount = countKnightJumpOptions(board, side, knightX, knightY);
+    const int forwardJumps = countKnightForwardJumps(board, side, knightX, knightY);
+    return jumpCount >= 4 || forwardJumps >= 2;
+}
+
+bool isNaturalRookDevelopmentMove(colorType side, const Move& move) {
+    const int homeY = homeRank(side);
+    if (move.source_y != homeY) {
+        return false;
+    }
+
+    const bool fromCorner = (move.source_x == 0 || move.source_x == 8);
+    if (fromCorner) {
+        if (move.target_x == move.source_x && advanceOf(side, move.target_y) >= 1) {
+            return true;
+        }
+        if (move.target_y == homeY &&
+            (move.target_x == 1 || move.target_x == 7 || move.target_x == 3 || move.target_x == 5)) {
+            return true;
+        }
+    }
+
+    if (move.target_y == homeY && (move.target_x == 3 || move.target_x == 5)) {
+        return true;
+    }
+    if (move.target_x == move.source_x && advanceOf(side, move.target_y) >= 2) {
+        return true;
+    }
+    return false;
+}
+
+bool isMeaninglessEarlyRookShift(colorType side, const Move& move) {
+    if (move.source_y != homeRank(side) || move.target_y != homeRank(side)) {
+        return false;
+    }
+    if (isNaturalRookDevelopmentMove(side, move)) {
+        return false;
+    }
+    return move.source_x != move.target_x;
+}
+
+int rookFileQuality(const ChessBoard& board, colorType side, int fileX) {
+    bool ownPawn = false;
+    bool oppPawn = false;
+    const colorType opp = ChessBoard::oppColor(side);
+    for (int y = 0; y < BOARDHEIGHT; ++y) {
+        const Grid g = board.getGridAt(fileX, y);
+        if (g.type != Pawn) {
+            continue;
+        }
+        if (g.color == side) {
+            ownPawn = true;
+        } else if (g.color == opp) {
+            oppPawn = true;
+        }
+    }
+    if (!ownPawn && !oppPawn) {
+        return 2;
+    }
+    if (!ownPawn && oppPawn) {
+        return 1;
+    }
+    return 0;
+}
+
+int bishopDevelopmentReplyPotential(const ChessBoard& board, colorType side, int flank) {
+    int best = 0;
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side || g.type != Bishop) {
+                continue;
+            }
+            if (!onFlank(x, flank) && x != 4) {
+                continue;
+            }
+            for (int d = 0; d < 4; ++d) {
+                const int tx = x + dx_bishop[d];
+                const int ty = y + dy_bishop[d];
+                const int eyeX = x + dx_bishop_eye[d];
+                const int eyeY = y + dy_bishop_eye[d];
+                if (!ChessBoard::inBoard(tx, ty) || !ChessBoard::inColorArea(tx, ty, side)) {
+                    continue;
+                }
+                if (board.getGridAt(eyeX, eyeY).color != EMPTY || board.getGridAt(tx, ty).color != EMPTY) {
+                    continue;
+                }
+
+                int improve = 0;
+                if (std::abs(tx - 4) < std::abs(x - 4)) {
+                    improve += 6;
+                }
+                if (advanceOf(side, ty) > advanceOf(side, y)) {
+                    improve += 4;
+                }
+                if (tx == 4) {
+                    improve += 4;
+                }
+                best = std::max(best, improve);
+            }
+        }
+    }
+    return best;
+}
+
+int flankDefenseScore(const ChessBoard& board, colorType side, int flank) {
+    int score = 0;
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side) {
+                continue;
+            }
+
+            const bool mainFlank = onFlank(x, flank);
+            switch (g.type) {
+                case Rook:
+                    score += mainFlank ? 6 : (x == 4 ? 2 : 0);
+                    break;
+                case Cannon:
+                    score += mainFlank ? 5 : (x == 4 ? 2 : 0);
+                    break;
+                case Knight:
+                    score += mainFlank ? 5 : (x == 4 ? 1 : 0);
+                    break;
+                case Bishop:
+                case Assistant:
+                    score += (mainFlank || x == 4) ? 2 : 0;
+                    break;
+                case Pawn:
+                    if (mainFlank) {
+                        score += crossedRiver(side, y) ? 2 : 1;
+                    }
+                    break;
+                case King:
+                    score += (x == 4 || mainFlank) ? 1 : 0;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    return score;
+}
+
+int weakerFlank(const ChessBoard& board, colorType defender) {
+    const int left = flankDefenseScore(board, defender, 0);
+    const int right = flankDefenseScore(board, defender, 1);
+    if (std::abs(left - right) < 3) {
+        return -1;
+    }
+    return left < right ? 0 : 1;
+}
+
+int attackTowardsWeakerFlankBonus(const ChessBoard& board, colorType attacker,
+                                  int x, int y, stoneType type) {
+    if (type != Rook && type != Knight && type != Cannon) {
+        return 0;
+    }
+
+    if (type == Rook && !isDevelopedRook(attacker, x, y)) {
+        return 0;
+    }
+    if (type == Knight && !isDevelopedKnight(attacker, x, y)) {
+        return 0;
+    }
+    if (type == Cannon && x != 4 && advanceOf(attacker, y) < 2) {
+        return 0;
+    }
+
+    const colorType defender = ChessBoard::oppColor(attacker);
+    const int weakFlank = weakerFlank(board, defender);
+    if (weakFlank < 0) {
+        return 0;
+    }
+
+    const int leftDefense = flankDefenseScore(board, defender, 0);
+    const int rightDefense = flankDefenseScore(board, defender, 1);
+    const int diff = std::abs(leftDefense - rightDefense);
+    const int pieceFlank = flankIndexFromFile(x);
+    const int base = (type == Rook) ? 14 : (type == Cannon ? 12 : 10);
+
+    if (pieceFlank < 0) {
+        if (x == 4 && (type == Rook || type == Cannon) && advanceOf(attacker, y) >= 2) {
+            return 4 + diff;
+        }
+        return 0;
+    }
+
+    if (pieceFlank == weakFlank) {
+        return base + diff * 2 + (advanceOf(attacker, y) >= 5 ? 4 : 0);
+    }
+    if (advanceOf(attacker, y) >= 4) {
+        return -(base / 2) - diff;
+    }
+    return 0;
+}
+
+bool cannonAttacksTargetOnLine(const ChessBoard& board, int cannonX, int cannonY, int targetX, int targetY) {
+    return ChessBoard::inSameStraightLine(cannonX, cannonY, targetX, targetY) &&
+           countPiecesBetween(board, cannonX, cannonY, targetX, targetY) == 1;
+}
+
+bool cannonPressesFlankKnight(const ChessBoard& board, colorType attacker, int cannonX, int cannonY, int flank) {
+    const colorType defender = ChessBoard::oppColor(attacker);
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != defender || g.type != Knight || !onFlank(x, flank)) {
+                continue;
+            }
+            if (cannonAttacksTargetOnLine(board, cannonX, cannonY, x, y)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool cannonOnlyHarassesFlankPawn(const ChessBoard& board, colorType attacker, int cannonX, int cannonY, int flank) {
+    const colorType defender = ChessBoard::oppColor(attacker);
+    bool attacksFlankPawn = false;
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != defender || g.type != Pawn || !onFlank(x, flank)) {
+                continue;
+            }
+            if ((x == 2 || x == 6) && cannonAttacksTargetOnLine(board, cannonX, cannonY, x, y)) {
+                attacksFlankPawn = true;
+            }
+        }
+    }
+    if (!attacksFlankPawn) {
+        return false;
+    }
+    return !cannonPressesFlankKnight(board, attacker, cannonX, cannonY, flank);
+}
+
+int cannonNaturalReliefPenalty(ChessBoard& board, const Move& move, colorType side) {
+    const Grid source = board.getGridAt(move.source_x, move.source_y);
+    if (source.type != Cannon) {
+        return 0;
+    }
+
+    const int flank = flankIndexFromFile(move.target_x);
+    if (flank < 0 || advanceOf(side, move.target_y) < 3) {
+        return 0;
+    }
+
+    board.makeMoveAssumeLegal(move);
+    const colorType defender = board.currentColor();
+    const int bishopReply = bishopDevelopmentReplyPotential(board, defender, flank);
+    const bool pressesKnight = cannonPressesFlankKnight(board, side, move.target_x, move.target_y, flank);
+    const bool onlyHarassPawn = cannonOnlyHarassesFlankPawn(board, side, move.target_x, move.target_y, flank);
+
+    int penalty = 0;
+    if (pressesKnight) {
+        penalty += 120;
+        if (bishopReply >= 6) {
+            penalty += 220;
+        }
+    }
+    if (onlyHarassPawn) {
+        penalty += 140;
+        if (bishopReply >= 4) {
+            penalty += 140;
+        }
+    }
+    if (!isCannonMoveUseful(board, move, side, 256) && bishopReply > 0) {
+        penalty += 80 + bishopReply * 5;
+    }
+
+    board.undoMove();
+    return penalty;
 }
 
 bool isClassicWocaoSquare(colorType defender, int x, int y) {
@@ -118,7 +515,7 @@ bool knightAttacksSquare(const ChessBoard& board, int knightX, int knightY, int 
 }
 
 // 判断炮的移动是否形成了有意义的战术构型（中路/空头炮/炮架/对敌将线）
-bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType side, int phase) {
+bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType side, int /*phase*/) {
     const int tx = move.target_x;
     const int ty = move.target_y;
     const colorType opp = ChessBoard::oppColor(side);
@@ -144,13 +541,18 @@ bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType sid
         }
     }
 
-    // 肋道炮（3路或5路）配合车/马
+    // 肋道炮（3路或5路）需要有实际配合才有用
     if (tx == 3 || tx == 5) {
-        // 检查同列是否有己方车
+        // 同列有己方车 → 车炮配合
         for (int fy = 0; fy < BOARDHEIGHT; ++fy) {
             if (fy == ty) continue;
             const Grid g = board.getGridAt(tx, fy);
             if (g.color == side && g.type == Rook) return true;
+        }
+        // 肋道且深入对方阵地接近帅 → 有压制价值
+        int advLocal = advanceOf(side, ty);
+        if (oppKX >= 0 && std::abs(tx - oppKX) <= 1 && advLocal >= 7) {
+            return true;
         }
     }
 
@@ -167,87 +569,87 @@ bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType sid
 // PST（红方视角，x=0..8, y=0..9）
 // =====================================================================
 static const int PST_PAWN[BOARDWIDTH][BOARDHEIGHT] = {
-    { 0, 0, 0, 0, 0,18,16, 8, 6, 0},
-    { 0, 0, 0, 0, 0,20,30,20,10, 0},
-    { 0, 0, 0, 0, 2,22,32,24,18, 0},
-    { 0, 0, 0, 0, 5,35,45,35,24, 0},
-    { 0, 0, 0, 0, 8,40,55,40,30, 0},
-    { 0, 0, 0, 0, 5,35,45,35,24, 0},
-    { 0, 0, 0, 0, 2,22,32,24,18, 0},
-    { 0, 0, 0, 0, 0,20,30,20,10, 0},
-    { 0, 0, 0, 0, 0,18,16, 8, 6, 0}
+    {  0,  0,  0,  0,  2,  1,  1,  1,  1, -5},
+    {  0,  0,  0,  0,  1,  3,  3,  3,  4, -5},
+    {  0,  0,  0,  0,  4,  6,  6,  8, 10, -5},
+    {  0,  0,  0,  0,  6,  8, 10, 10, 14, -5},
+    {  0,  0,  0,  0,  8, 10, 12, 12, 12, -6},
+    {  0,  0,  0,  0,  6,  8, 10, 10, 14, -5},
+    {  0,  0,  0,  0,  4,  6,  8,  8, 10, -5},
+    {  0,  0,  0,  0,  1,  3,  3,  3,  4, -5},
+    {  0,  0,  0,  0,  2,  1,  1,  1,  1, -5}
 };
 
 static const int PST_KNIGHT[BOARDWIDTH][BOARDHEIGHT] = {
-    {-10,-10, -8, -6,  0,  2,  4,  4, -4,-10},
-    { -6, -2,  2,  6,  8, 10,  8,  6,  0, -6},
-    { -4,  4,  8, 12, 14, 16, 16, 14,  4, -4},
-    {  0,  6, 14, 18, 20, 22, 22, 18,  8,  0},
-    {  2,  8, 16, 20, 24, 26, 26, 22, 10,  2},
-    {  0,  6, 14, 18, 20, 22, 22, 18,  8,  0},
-    { -4,  4,  8, 12, 14, 16, 16, 14,  4, -4},
-    { -6, -2,  2,  6,  8, 10,  8,  6,  0, -6},
-    {-10,-10, -8, -6,  0,  2,  4,  4, -4,-10}
+    {-15,  0,  8, -4,  2,  2,  0,  8, -2,  0},
+    { -8,-10,  6,  0,  5,  0, 10,  4,  4,  4},
+    { -5, -4, 10, -2, 15,  4,  6,  8, 15,  2},
+    { -4,  6,  4, -1,  8,  8, 10, 10,  4,  2},
+    {-30, -5,  0,  8,  7,  2,  8,  8,  0,  0},
+    { -4,  6,  4, -1,  8,  8, 10, 10,  4,  2},
+    { -5, -4, 10, -2, 15,  4,  6,  8, 15,  2},
+    { -8,-10,  6,  0,  5,  0, 10,  4,  4,  4},
+    {-15,  0,  8, -4,  2,  2,  0,  8, -2,  0}
 };
 
 static const int PST_ROOK[BOARDWIDTH][BOARDHEIGHT] = {
-    {  0,  2,  4,  6,  8, 10, 10, 10,  8,  0},
-    {  4,  6,  8, 10, 12, 14, 14, 12, 10,  4},
-    {  2,  6,  8, 10, 14, 16, 16, 14, 10,  2},
-    {  6,  8, 10, 14, 18, 22, 22, 18, 14,  6},
-    {  8, 10, 12, 16, 22, 28, 28, 24, 18,  8},
-    {  6,  8, 10, 14, 18, 22, 22, 18, 14,  6},
-    {  2,  6,  8, 10, 14, 16, 16, 14, 10,  2},
-    {  4,  6,  8, 10, 12, 14, 14, 12, 10,  4},
-    {  0,  2,  4,  6,  8, 10, 10, 10,  8,  0}
+    {  0,  6,  4,  2,  6,  6,  7,  0,  0,  4},
+    {  8, 10,  6,  2, 12,  8, 12,  8, 10,  6},
+    {  6,  4,  4,  2, 14,  0, 10,  6,  6,  5},
+    {  9, 14,  8,  2, 12, 10, 12,  6, 10,  8},
+    { -5, -4, -3,  2,  4,  3, 11,  2, -4, -6},
+    {  9, 14,  8,  2, 12, 10, 12,  6, 10,  8},
+    {  6,  4,  4,  2, 14,  0, 10,  6,  6,  5},
+    {  8, 10,  6,  2, 12,  8, 12,  8, 10,  6},
+    {  0,  6,  4,  2,  6,  6,  7,  0,  0,  4}
 };
 
 static const int PST_CANNON[BOARDWIDTH][BOARDHEIGHT] = {
-    { 0, 0, 2, 4, 6, 6, 4, 4, 2, 0},
-    { 2, 2, 4, 6, 8, 8, 8, 6, 4, 2},
-    { 2, 4, 6, 8,12,12,10, 8, 6, 2},
-    { 4, 6, 8,10,14,16,14,12, 8, 4},
-    { 6, 8, 8, 8,10,12,12,10, 8, 6},
-    { 4, 6, 8,10,14,16,14,12, 8, 4},
-    { 2, 4, 6, 8,12,12,10, 8, 6, 2},
-    { 2, 2, 4, 6, 8, 8, 8, 6, 4, 2},
-    { 0, 0, 2, 4, 6, 6, 4, 4, 2, 0}
+    { -8,  4, 10,  2,  4,  6,  8,  7,  6, 14},
+    {  2,  6,  6,  2,  8,  8,  8,  6,  6, 14},
+    {  4,  4, 12,  2,  6,  2,  6,  7,  4,  6},
+    {  6,  0, 12,  2,  4,  2,  6,  8,  6,  8},
+    {-15,  6, 15,  6,  8,  6, 12,  8,  4,-10},
+    {  6,  0, 12,  2,  4,  2,  6,  8,  6,  8},
+    {  4,  4, 12,  2,  6,  2,  6,  7,  4,  6},
+    {  2,  6,  6,  2,  8,  8,  8,  6,  6, 14},
+    { -8,  4, 10,  2,  4,  6,  8,  7,  6, 14}
 };
 
 static const int PST_BISHOP[BOARDWIDTH][BOARDHEIGHT] = {
-    { 0, 0,-2, 0, 0, 0, 0, 0, 0, 0},
+    { 0, 0, 4, 0, 0, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 4, 0, 6, 0, 0, 0, 0, 0},
+    { 6, 0, 0, 0, 2, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 8, 0, 0, 0, 0, 0},
+    { 0, 0, 10,0, 0, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 4, 0, 6, 0, 0, 0, 0, 0},
+    { 6, 0, 0, 0, 2, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0,-2, 0, 0, 0, 0, 0, 0, 0}
+    { 0, 0, 4, 0, 0, 0, 0, 0, 0, 0}
 };
 
 static const int PST_GUARD[BOARDWIDTH][BOARDHEIGHT] = {
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 2, 0, 4, 0, 0, 0, 0, 0},
-    { 0, 2, 0, 6, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 2, 0, 4, 0, 0, 0, 0, 0},
+    { 5, 0, 3, 0, 0, 0, 0, 0, 0, 0},
+    { 0, 8, 0, 0, 0, 0, 0, 0, 0, 0},
+    { 5, 0, 3, 0, 0, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
     { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 };
 
 static const int PST_KING[BOARDWIDTH][BOARDHEIGHT] = {
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {-2, 0, 2, 0, 4, 0, 0, 0, 0, 0},
-    { 0, 2, 4, 6, 2, 0, 0, 0, 0, 0},
-    {-2, 0, 2, 0, 4, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {10, 8, 2, 0, 0, 0, 0, 0, 0, 0},
+    {20, 5, 3, 0, 0, 0, 0, 0, 0, 0},
+    {10, 8, 2, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 };
 
 // =====================================================================
@@ -297,7 +699,7 @@ AIPlayer::AIPlayer()
 // =====================================================================
 int AIPlayer::pieceValueMg(stoneType t) {
     switch (t) {
-        case Rook:      return 800;
+        case Rook:      return 850;
         case Cannon:    return 440;
         case Knight:    return 370;
         case Pawn:      return 100;
@@ -323,7 +725,7 @@ int AIPlayer::pieceValueEg(stoneType t) {
 
 int AIPlayer::pieceBaseValue(stoneType t) {
     switch (t) {
-        case Rook:      return 800;
+        case Rook:      return 850;
         case Cannon:    return 400;
         case Knight:    return 400;
         case Pawn:      return 100;
@@ -1039,6 +1441,7 @@ int AIPlayer::evalAttackPressure(const ChessBoard& board, colorType side) const 
     const colorType opp = ChessBoard::oppColor(side);
     ChessBoard& mutableBoard = const_cast<ChessBoard&>(board);
     const int phase = endgamePhase(board);
+    const int weakFlank = TacticalRules::weakerFlank(board, opp);
 
     for (int x = 0; x < BOARDWIDTH; ++x) {
         for (int y = 0; y < BOARDHEIGHT; ++y) {
@@ -1059,16 +1462,45 @@ int AIPlayer::evalAttackPressure(const ChessBoard& board, colorType side) const 
                 score += 3;
             }
 
-            // "帮对方活子"惩罚：如果被攻击的子还在初始受限位置，
+            TacticalRules::RootInfo rootInfo;
+            if (g.type != King && g.type != None) {
+                rootInfo = TacticalRules::analyzeRoot(board, x, y);
+                if (rootInfo.severelyHanging) {
+                    score += 20 + pieceBaseValue(g.type) / 35;
+                } else if (rootInfo.inDanger) {
+                    score += 10 + pieceBaseValue(g.type) / 55;
+                } else if (rootInfo.virtualRoot) {
+                    score += 5;
+                } else if (rootInfo.hasRoot) {
+                    score -= 4;
+                }
+                if (weakFlank >= 0 && TacticalRules::onFlank(x, weakFlank)) {
+                    score += rootInfo.hasRoot ? 3 : 9;
+                }
+            }
+
+            // "帮对方活子"惩罚：如果被攻击的子在差位置或初始受限位置，
             // 被赶走后可能去到更好的位置，此时攻击收益打折
-            if (phase > 160) {
+            if (phase > 150) {
+                // 通用：对方子当前位置PST很低 => 被赶走后大概率变好
+                int piecePst = positionValue(g.type, g.color, x, y);
+                if (piecePst <= 4 && (g.type == Rook || g.type == Knight || g.type == Cannon)) {
+                    score -= 5;
+                }
                 // 对方马还在初始位置被攻击 => 赶走它反而帮它出子
                 if (g.type == Knight && !isDevelopedKnight(opp, x, y)) {
-                    score -= 6;
+                    score -= 8;
                 }
                 // 对方车在角上被骚扰 => 可能帮它出来
                 if (g.type == Rook && !isDevelopedRook(opp, x, y)) {
-                    score -= 8;
+                    score -= 10;
+                }
+                // 对方炮在初始位置被骚扰 => 可能帮它走到更好位置
+                if (g.type == Cannon && !isDevelopedCannon(opp, x, y)) {
+                    score -= 5;
+                }
+                if ((g.type == Rook || g.type == Cannon) && rootInfo.hasRoot && !rootInfo.virtualRoot) {
+                    score -= 4; // 有实根的车炮不应被盲目高估为攻击成果
                 }
             }
         }
@@ -1089,9 +1521,17 @@ int AIPlayer::evalDevelopment(const ChessBoard& board, colorType side, int phase
     int developedKnights = 0;
     int developedCannons = 0;
     int centeredCannons = 0;
+    int normalRooks = 0;
+    int normalKnights = 0;
+    int activatedKnights = 0;
+    int usefulCannons = 0;
     int totalRooks = 0;
     int totalKnights = 0;
     int totalCannons = 0;
+    bool leftKnightNormal = false;
+    bool rightKnightNormal = false;
+    bool leftKnightActivated = false;
+    bool rightKnightActivated = false;
 
     for (int x = 0; x < BOARDWIDTH; ++x) {
         for (int y = 0; y < BOARDHEIGHT; ++y) {
@@ -1102,89 +1542,224 @@ int AIPlayer::evalDevelopment(const ChessBoard& board, colorType side, int phase
             if (g.type == Rook) {
                 ++totalRooks;
                 if (isDevelopedRook(side, x, y)) {
+                    const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
                     ++developedRooks;
                     score += 12;
+                    if (y == homeRank(side) && (x == 1 || x == 7)) {
+                        ++normalRooks;
+                        score += 18; // 车一平二式的正常出车
+                    }
+                    if (y == homeRank(side) && (x == 3 || x == 5)) {
+                        ++normalRooks;
+                        score += 26; // 从士位出车更具人类布局感
+                    }
+                    if (advanceOf(side, y) >= 2) {
+                        score += 18; // 进一步出车
+                    }
+                    const int fileQuality = rookFileQuality(board, side, x);
+                    if (fileQuality == 2) {
+                        score += 10;
+                    } else if (fileQuality == 1) {
+                        score += 6;
+                    }
+                    if (root.hasRoot) {
+                        score += 6;
+                    } else if (root.virtualRoot) {
+                        score -= 8;
+                    } else if (root.inDanger) {
+                        score -= 14;
+                    }
                 } else if (x == 0 || x == 8) {
-                    score -= 28;
-                } else {
-                    score -= 16;
-                }
-            } else if (g.type == Knight) {
-                ++totalKnights;
-                if (isDevelopedKnight(side, x, y)) {
-                    ++developedKnights;
-                    score += 8;
+                    score -= 32; // 长时间闷在底线角上
                 } else {
                     score -= 18;
                 }
-            } else if (g.type == Cannon) {
-                ++totalCannons;
-                if (x == 4 && advanceOf(side, y) >= 2) {
-                    ++centeredCannons;
-                    ++developedCannons;
-                    score += 16;
-                } else if (isDevelopedCannon(side, x, y)) {
-                    ++developedCannons;
-                    // 炮已离开初始位置但不在中路
-                    if (phase > 170 && x != 4 && advanceOf(side, y) <= 2) {
-                        // 炮跑到河岸附近但没有战术意义 => 轻微惩罚
-                        score -= 6;
+            } else if (g.type == Knight) {
+                ++totalKnights;
+                const int jumpCount = countKnightJumpOptions(board, side, x, y);
+                const int forwardJumps = countKnightForwardJumps(board, side, x, y);
+                const int blockedLegs = countKnightBlockedLegs(board, x, y);
+                if (isDevelopedKnight(side, x, y)) {
+                    const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
+                    ++developedKnights;
+                    score += 8;
+                    score += jumpCount * 3 + forwardJumps * 4;
+                    score -= blockedLegs * 5;
+
+                    if (isNormalKnightSquare(side, x, y)) {
+                        ++normalKnights;
+                        score += 28; // 明显鼓励正马
+                        if (x == 2) {
+                            leftKnightNormal = true;
+                        } else if (x == 6) {
+                            rightKnightNormal = true;
+                        }
+                    } else if (phase > 170 && advanceOf(side, y) <= 2) {
+                        score -= 16; // 早期边马、怪马降权
+                    }
+
+                    const int pawnFile = (x <= 4) ? 2 : 6;
+                    if (flankPawnActivatesKnight(board, side, x, y, pawnFile)) {
+                        ++activatedKnights;
+                        score += 16; // 三七兵真正活马时再奖励
+                        if (pawnFile == 2) {
+                            leftKnightActivated = true;
+                        } else {
+                            rightKnightActivated = true;
+                        }
+                    }
+                    if (root.hasRoot) {
+                        score += 5;
+                    } else if (root.virtualRoot) {
+                        score -= 7;
+                    } else if (root.inDanger) {
+                        score -= 12;
                     }
                 } else {
-                    // 炮还在初始位置
-                    score -= 4;
+                    score -= 20;
+                    if (isInitialKnightSquare(side, x, y) && phase > 170) {
+                        score -= 6;
+                    }
+                }
+            } else if (g.type == Cannon) {
+                ++totalCannons;
+                const int adv = advanceOf(side, y);
+                const bool useful = isCannonMoveUseful(board, Move(x, y, x, y), side, phase);
+                const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
+                if (x == 4 && adv >= 2) {
+                    ++centeredCannons;
+                    ++developedCannons;
+                    ++usefulCannons;
+                    score += 22; // 中炮优先
+                } else if (isDevelopedCannon(side, x, y)) {
+                    ++developedCannons;
+                    if (useful) {
+                        ++usefulCannons;
+                        score += 10;
+                    } else {
+                        if (phase > 170) {
+                            score -= 14; // 炮先动但没形成中炮/炮架/沉底压制
+                        }
+                        if (adv >= 4) {
+                            score -= 12;
+                        }
+                    }
+                    if (phase > 170 && x != 4 && adv <= 2) {
+                        score -= 10;
+                    }
+                    if (phase > 180 && adv >= 4 && x != 4 && !useful) {
+                        score -= 18;
+                    }
+                } else {
+                    score -= 6;
+                }
+                if (root.hasRoot && useful) {
+                    score += 6;
+                } else if (root.virtualRoot) {
+                    score -= 8;
+                } else if (root.inDanger && (!useful || adv >= 4)) {
+                    score -= 14;
                 }
             }
         }
     }
 
+    if (flankPawnAdvanced(board, side, 2) && !leftKnightActivated && !leftKnightNormal && phase > 170) {
+        score -= 6; // 三兵已动但没有真正活左马，不鼓励机械冲兵
+    }
+    if (flankPawnAdvanced(board, side, 6) && !rightKnightActivated && !rightKnightNormal && phase > 170) {
+        score -= 6; // 七兵同理
+    }
+
     if (developedRooks == 0) {
-        score -= 30;
+        score -= 34;
     } else if (developedRooks == 1 && totalRooks >= 2) {
-        score -= 10;
+        score -= 12;
     }
     if (developedKnights == 0) {
-        score -= 16;
+        score -= 20;
     }
     if (centeredCannons == 0 && phase > 180) {
-        score -= 10;
+        score -= 14;
+    }
+    if (normalKnights == 0 && phase > 170) {
+        score -= 12;
+    } else if (normalKnights == 1) {
+        score += 8;
+    } else if (normalKnights >= 2) {
+        score += 18;
+    }
+    if (normalRooks >= 2) {
+        score += 16;
+    } else if (normalRooks == 1) {
+        score += 6;
+    }
+    if (activatedKnights == 1) {
+        score += 8;
+    } else if (activatedKnights >= 2) {
+        score += 16;
+    }
+    if (developedCannons > 0 && usefulCannons == 0 && phase > 180) {
+        score -= 16; // 炮都动了，但没有一个是中炮/有用炮
     }
 
     // ---- 六大子均衡发展奖惩 ----
-    // 总已发展大子数
     const int totalDeveloped = developedRooks + developedKnights + developedCannons;
     const int totalMajors = totalRooks + totalKnights + totalCannons;
 
     if (phase > 160 && totalMajors >= 4) {
         // 奖励整体展开
         if (totalDeveloped >= 5) {
-            score += 20;
+            score += 26;
         } else if (totalDeveloped >= 4) {
-            score += 12;
+            score += 16;
         } else if (totalDeveloped >= 3) {
-            score += 4;
+            score += 6;
         }
 
         // 惩罚不均衡：某类大子完全没出，但其他已经出了
-        int typesStuck = 0; // 有多少类大子完全没发展
+        int typesStuck = 0;
         if (totalRooks > 0 && developedRooks == 0) ++typesStuck;
         if (totalKnights > 0 && developedKnights == 0) ++typesStuck;
         if (totalCannons > 0 && developedCannons == 0) ++typesStuck;
 
         if (typesStuck >= 2 && totalDeveloped >= 1) {
-            // 只出了一两类子，其他两类没出 => 不均衡
-            score -= 18;
+            score -= 26; // 严重不均衡惩罚加重
         } else if (typesStuck == 1 && totalDeveloped >= 2) {
-            score -= 8;
+            score -= 12;
+        }
+
+        // 特别惩罚：车没出但炮已经在跑 => 发展失调
+        if (totalRooks > 0 && developedRooks == 0 && developedCannons > 0) {
+            score -= 18;
+        }
+        // 特别惩罚：只有炮活跃，马车都没出
+        if (totalRooks > 0 && developedRooks == 0
+            && totalKnights > 0 && developedKnights == 0
+            && developedCannons > 0) {
+            score -= 22;
         }
 
         // 双车出动额外奖励
         if (developedRooks >= 2) {
-            score += 10;
+            score += 14;
         }
         // 双马出动额外奖励
         if (developedKnights >= 2) {
-            score += 6;
+            score += 8;
+        }
+        if (centeredCannons >= 1 && developedCannons >= 2) {
+            score += 10; // 双炮形成合理分工，中炮更佳
+        }
+        // 三类子都至少出一个 → 协调奖励
+        if (developedRooks > 0 && developedKnights > 0 && developedCannons > 0) {
+            score += 12;
+        }
+        if (developedRooks >= 2 && normalKnights >= 2) {
+            score += 14; // 车马都按常规节奏展开
+        }
+        if (developedRooks >= 2 && normalKnights >= 2 && centeredCannons >= 1) {
+            score += 14; // 六大子整体协调时再给明显奖励
         }
     }
 
@@ -1221,6 +1796,7 @@ int AIPlayer::evalPieceActivity(const ChessBoard& board, colorType side, int pha
             }
 
             if (g.type == Rook) {
+                const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
                 if (rookCount < 2) {
                     rookX[rookCount] = x;
                     rookY[rookCount] = y;
@@ -1234,6 +1810,23 @@ int AIPlayer::evalPieceActivity(const ChessBoard& board, colorType side, int pha
                 }
                 if (y == riverY || y == riverY + ((side == RED) ? 1 : -1)) {
                     score += 12;
+                }
+                const int fileQuality = rookFileQuality(board, side, x);
+                if (fileQuality == 2) {
+                    score += 14; // 开放线上的车更有压制力
+                } else if (fileQuality == 1) {
+                    score += 8; // 半开放线也应鼓励
+                }
+                if (phase > 170 && isInitialRookSquare(side, x, y)) {
+                    score -= 14; // 车还闷在底线角上
+                }
+                score += attackTowardsWeakerFlankBonus(board, side, x, y, Rook);
+                if (root.hasRoot) {
+                    score += 8;
+                } else if (root.virtualRoot) {
+                    score -= 6;
+                } else if (root.inDanger) {
+                    score -= 14;
                 }
                 if (y == enemyBase) {
                     score += 18;
@@ -1251,7 +1844,31 @@ int AIPlayer::evalPieceActivity(const ChessBoard& board, colorType side, int pha
             }
 
             if (g.type == Knight) {
+                const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
                 const int adv = advanceOf(side, y);
+                const int jumpCount = countKnightJumpOptions(board, side, x, y);
+                const int forwardJumps = countKnightForwardJumps(board, side, x, y);
+                const int blockedLegs = countKnightBlockedLegs(board, x, y);
+                score += jumpCount * ((phase < 128) ? 4 : 3);
+                score += forwardJumps * 3;
+                score -= blockedLegs * 4;
+                if (isNormalKnightSquare(side, x, y)) {
+                    score += 14;
+                } else if (phase > 170 && isDevelopedKnight(side, x, y) && adv <= 2) {
+                    score -= 12; // 早期怪马、边马
+                }
+                const int pawnFile = (x <= 4) ? 2 : 6;
+                if (flankPawnActivatesKnight(board, side, x, y, pawnFile)) {
+                    score += 12;
+                }
+                score += attackTowardsWeakerFlankBonus(board, side, x, y, Knight);
+                if (root.hasRoot) {
+                    score += 5;
+                } else if (root.virtualRoot) {
+                    score -= 5;
+                } else if (root.inDanger && adv >= 3) {
+                    score -= 10;
+                }
                 if (adv >= 5) {
                     int strongJumps = 0;
                     for (int d = 0; d < 8; ++d) {
@@ -1274,7 +1891,9 @@ int AIPlayer::evalPieceActivity(const ChessBoard& board, colorType side, int pha
             }
 
             if (g.type == Cannon) {
+                const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
                 const int adv = advanceOf(side, y);
+                const bool useful = isCannonMoveUseful(board, Move(x, y, x, y), side, phase);
                 if (x == 4 && phase > 140) {
                     score += 18;
                     if (oppKingX == 4) {
@@ -1289,11 +1908,78 @@ int AIPlayer::evalPieceActivity(const ChessBoard& board, colorType side, int pha
                         if (between == 1) {
                             score += 38;
                         } else if (between == 0) {
-                            score += 18;
+                            score += 28; // 空头炮压中路要进一步奖励
                         }
                     }
                 } else if (phase > 180 && adv <= 1) {
                     score -= 8;
+                }
+
+                if (useful && x != 4) {
+                    score += 8;
+                }
+                if (!useful && phase > 170 && adv >= 3 && x != 4) {
+                    score -= 12;
+                }
+                if ((x == 0 || x == 8) && phase > 160 && !useful) {
+                    score -= 12; // 边线炮没有实质压制时应降权
+                }
+
+                // 炮在河岸区域（advance 4-6）但没有有效炮架 => 位置较差
+                if (phase > 150 && adv >= 4 && adv <= 6 && x != 4) {
+                    bool hasMount = false;
+                    for (int md = 0; md < 4 && !hasMount; ++md) {
+                        int mx = x + dx_strai[md];
+                        int my = y + dy_strai[md];
+                        bool foundScreen = false;
+                        while (ChessBoard::inBoard(mx, my)) {
+                            const Grid mg = board.getGridAt(mx, my);
+                            if (mg.color != EMPTY) {
+                                if (!foundScreen) {
+                                    foundScreen = true;
+                                } else {
+                                    if (mg.color == opp &&
+                                        (mg.type == Rook || mg.type == King || mg.type == Knight)) {
+                                        hasMount = true;
+                                    }
+                                    break;
+                                }
+                            }
+                            mx += dx_strai[md];
+                            my += dy_strai[md];
+                        }
+                    }
+                    if (!hasMount) {
+                        score -= 16; // 河岸炮无有效威胁，位置差
+                    }
+                }
+
+                const int flank = flankIndexFromFile(x);
+                if (phase > 150 && flank >= 0) {
+                    const int bishopReply = bishopDevelopmentReplyPotential(board, opp, flank);
+                    if (cannonPressesFlankKnight(board, side, x, y, flank)) {
+                        score += 10;
+                        if (bishopReply >= 6) {
+                            score -= 20; // 炮压马但可被飞象舒服化解
+                        }
+                    }
+                    if (cannonOnlyHarassesFlankPawn(board, side, x, y, flank) && !useful) {
+                        score -= 18;
+                        if (bishopReply >= 4) {
+                            score -= 14;
+                        }
+                    }
+                }
+
+                if (useful) {
+                    score += attackTowardsWeakerFlankBonus(board, side, x, y, Cannon);
+                }
+                if (root.hasRoot && useful) {
+                    score += 8;
+                } else if (root.virtualRoot) {
+                    score -= 8;
+                } else if (root.inDanger && (!useful || adv >= 4)) {
+                    score -= 16;
                 }
 
                 // 沉底炮
@@ -1595,8 +2281,15 @@ int AIPlayer::scoreMoveForOrdering(const ChessBoard& board, const Move& move,
         const int tx = move.target_x;
         const int ty = move.target_y;
 
-        // 根据局面紧张度调整将军方向奖励
-        const int checkBonus = checkingPhase ? 300000 : 120000;
+        // 将军方向奖励与局面紧张度关联：越紧张奖励越高
+        int checkBonus;
+        if (checkingPhase) {
+            checkBonus = 300000;
+        } else if (phase > 200 && enemyDeep == 0) {
+            checkBonus = 50000; // 开局且无敌深入 => 将军优先级很低
+        } else {
+            checkBonus = 120000;
+        }
 
         if (source.type == Rook && (tx == oppKingX || ty == oppKingY)) {
             score += checkBonus;
@@ -1699,6 +2392,37 @@ int AIPlayer::scoreMoveForOrdering(const ChessBoard& board, const Move& move,
                       - positionValue(source.type, source.color, move.source_x, move.source_y);
     score += (source.type == Rook || source.type == Cannon || source.type == Knight) ? pstDiff * 2 : pstDiff;
 
+    if (source.type == Rook || source.type == Cannon || source.type == Knight || source.type == Pawn) {
+        const bool sourceUnderAttack = const_cast<ChessBoard&>(board).attacked(
+            ChessBoard::oppColor(source.color), move.source_x, move.source_y);
+        if (sourceUnderAttack || target.color != EMPTY || phase > 180) {
+            const TacticalRules::MoveTacticalInfo tactical = TacticalRules::analyzeMove(
+                const_cast<ChessBoard&>(board), move);
+            score += tactical.activityDelta * 8;
+            score += tactical.destinationExchangeScore;
+            score += (tactical.destinationWeightedNet - tactical.sourceWeightedNet) / 2;
+            if (tactical.improvesByRunning) {
+                score += 220; // 被攻击时，跑到更好更安全的位置应优先
+            }
+            if (tactical.canRootSafely) {
+                score += 90; // 生根后交换不亏，排序应提前
+            }
+            if (tactical.prefersTrade) {
+                score += 120; // 车炮对棋若有利，应敢于简化
+            }
+            if (sourceUnderAttack && !tactical.destinationSafer) {
+                score -= 180; // 被打却只是机械挪一下，降权
+            }
+            if (target.color != EMPTY && (source.type == Rook || source.type == Cannon) && tactical.tradeScore < -30) {
+                score -= 140; // 不利的对车对炮不应盲目交换
+            }
+        }
+    }
+
+    if (phase > 140 && (source.type == Rook || source.type == Knight || source.type == Cannon)) {
+        score += attackTowardsWeakerFlankBonus(board, source.color, move.target_x, move.target_y, source.type) * 18;
+    }
+
     // 回退步惩罚
     if (ply >= 2 && isBacktrack(move, prevMove_[ply - 2])) {
         if (phase > 160 && (source.type == Cannon || source.type == Knight || source.type == Rook)) {
@@ -1708,19 +2432,47 @@ int AIPlayer::scoreMoveForOrdering(const ChessBoard& board, const Move& move,
         }
     }
 
+    // 开局避免同一大子反复承担全部任务
+    if (phase > 170 && ply >= 2 &&
+        prevMove_[ply - 2].target_x == move.source_x &&
+        prevMove_[ply - 2].target_y == move.source_y) {
+        if (source.type == Cannon) {
+            score -= 240;
+        } else if (source.type == Rook) {
+            score -= 160;
+        } else if (source.type == Knight) {
+            score -= 120;
+        }
+    }
+
     // 开局阶段特化
     if (phase > 96) {
         if (source.type == Rook) {
             const int adv = advanceOf(source.color, move.target_y);
+            if (isNaturalRookDevelopmentMove(source.color, move)) {
+                score += 360; // 车一平二、进一步出车、士位出车优先
+            }
             if (adv >= 2) {
                 score += 280;
             }
             if (move.target_x == 3 || move.target_x == 5) {
                 score += 220;
             }
+            if (move.target_y == homeRank(source.color) && (move.target_x == 1 || move.target_x == 7)) {
+                score += 120;
+            }
             const int riverRank = (source.color == RED) ? 4 : 5;
             if (move.target_y == riverRank || move.target_y == riverRank + ((source.color == RED) ? 1 : -1)) {
                 score += 160;
+            }
+            const int fileQuality = rookFileQuality(board, source.color, move.target_x);
+            if (fileQuality == 2) {
+                score += 80;
+            } else if (fileQuality == 1) {
+                score += 40;
+            }
+            if (phase > 170 && isMeaninglessEarlyRookShift(source.color, move)) {
+                score -= 260;
             }
             // 开局车出动优先级应比炮高
             if (phase > 170 && !isDevelopedRook(source.color, move.source_x, move.source_y)) {
@@ -1729,29 +2481,63 @@ int AIPlayer::scoreMoveForOrdering(const ChessBoard& board, const Move& move,
         }
         if (source.type == Knight) {
             const int adv = advanceOf(source.color, move.target_y);
+            const bool toNormal = isNormalKnightSquare(source.color, move.target_x, move.target_y);
             if (adv >= 3) {
                 score += 180;
             }
             // 马离开初始位 => 出子奖励
             if (phase > 170 && !isDevelopedKnight(source.color, move.source_x, move.source_y)
                 && isDevelopedKnight(source.color, move.target_x, move.target_y)) {
+                score += toNormal ? 420 : 120;
+            }
+            if (toNormal) {
                 score += 200;
+            } else if (phase > 170 && adv <= 2) {
+                score -= 160; // 早期边马、怪马不优先
+            }
+            const int pawnFile = (move.target_x <= 4) ? 2 : 6;
+            if (toNormal && flankPawnAdvanced(board, source.color, pawnFile)) {
+                score += 80; // 已有三七兵配合时，正马更值得优先
+            }
+        }
+        if (source.type == Pawn && phase > 160 && (move.source_x == 2 || move.source_x == 6) &&
+            move.target_x == move.source_x && move.target_y == move.source_y + forwardDir(source.color)) {
+            const int knightX = move.source_x;
+            const int knightY = (source.color == RED) ? 2 : 7;
+            const Grid wingKnight = board.getGridAt(knightX, knightY);
+            if (wingKnight.color == source.color && wingKnight.type == Knight &&
+                isNormalKnightSquare(source.color, knightX, knightY)) {
+                score += 140; // 三七兵活正马
+            } else {
+                score -= 40; // 没有实际活马时，不鼓励机械冲兵
             }
         }
         if (source.type == Cannon) {
+            const bool useful = isCannonMoveUseful(board, move, source.color, phase);
             if (move.target_x == 4 && phase > 160) {
                 score += 260; // 中炮
+                if (!isDevelopedCannon(source.color, move.source_x, move.source_y)) {
+                    score += 180;
+                }
+                if (oppKingX == 4) {
+                    score += 120;
+                }
+            }
+            if (useful) {
+                score += 180;
             }
 
             // ---- 炮乱动惩罚 ----
             // 开局炮不应该无意义跑到河岸去追打对方车
             if (phase > 160) {
                 const int cannonAdv = advanceOf(source.color, move.target_y);
+                const int reliefPenalty = cannonNaturalReliefPenalty(const_cast<ChessBoard&>(board), move, source.color);
+                score -= reliefPenalty;
 
-                // 炮到河岸（advance 4~5）但没有形成有效战术构型 => 降权
+                // 炮到河岸（advance 4~6）但没有形成有效战术构型 => 强烈降权
                 if (cannonAdv >= 4 && cannonAdv <= 6) {
-                    if (!isCannonMoveUseful(board, move, source.color, phase)) {
-                        score -= 350; // 明显惩罚无意义的河岸炮
+                    if (!useful) {
+                        score -= 600; // 强烈惩罚无意义的河岸炮
                     }
                 }
 
@@ -1759,20 +2545,20 @@ int AIPlayer::scoreMoveForOrdering(const ChessBoard& board, const Move& move,
                 if (move.source_y == move.target_y && move.target_x != 4
                     && move.target_x != 3 && move.target_x != 5
                     && cannonAdv <= 3) {
-                    score -= 160;
+                    score -= 220;
                 }
 
-                // 炮早期前压到对方半场非底线位置，没有明显战术 => 可能帮对方活子
+                // 炮早期前压到对方半场非底线位置，没有明显战术 => 帮对方活子
                 if (cannonAdv >= 5 && cannonAdv <= 7) {
-                    if (!isCannonMoveUseful(board, move, source.color, phase)) {
-                        score -= 250;
+                    if (!useful) {
+                        score -= 450;
                     }
                 }
             }
 
             // 炮还在初始位附近但不去中路
             if (advanceOf(source.color, move.target_y) <= 2 && move.target_x != 4) {
-                score -= 80;
+                score -= 120;
             }
 
             // 不在初始位的炮横移不去中路 => 可能无意义
@@ -1803,7 +2589,12 @@ int AIPlayer::scoreMoveForOrdering(const ChessBoard& board, const Move& move,
         const int oldDist = std::abs(move.source_x - oppKingX) + std::abs(move.source_y - oppKingY);
         const int newDist = std::abs(move.target_x - oppKingX) + std::abs(move.target_y - oppKingY);
         if (newDist < oldDist) {
-            score += (oldDist - newDist) * 15;
+            int bonus = (oldDist - newDist) * 15;
+            // 开局阶段炮不应盲目前冲靠近对方帅
+            if (source.type == Cannon && phase > 160) {
+                bonus = bonus / 3;
+            }
+            score += bonus;
         }
     }
 
@@ -1850,6 +2641,21 @@ int AIPlayer::scoreRootMove(const ChessBoard& board, const RootMoveInfo& moveInf
     }
 
     const Grid source = board.getGridAt(moveInfo.move.source_x, moveInfo.move.source_y);
+    const TacticalRules::MoveTacticalInfo tactical = TacticalRules::analyzeMove(
+        const_cast<ChessBoard&>(board), moveInfo.move);
+    score += tactical.activityDelta * 12;
+    score += tactical.destinationExchangeScore * 2;
+    score += tactical.destinationWeightedNet - tactical.sourceWeightedNet;
+    if (tactical.improvesByRunning) {
+        score += 240;
+    }
+    if (tactical.canRootSafely) {
+        score += 120;
+    }
+    if (tactical.prefersTrade) {
+        score += 150;
+    }
+
     if (currentDanger >= 80) {
         if (source.type == King) {
             score += 1500;
@@ -1865,11 +2671,16 @@ int AIPlayer::scoreRootMove(const ChessBoard& board, const RootMoveInfo& moveInf
     // 开局：惩罚炮的根节点步如果是无意义骚扰
     if (phase > 160 && source.type == Cannon) {
         const int cannonAdv = advanceOf(source.color, moveInfo.move.target_y);
-        if (cannonAdv >= 4 && cannonAdv <= 6) {
+        if (cannonAdv >= 4 && cannonAdv <= 7) {
             if (!isCannonMoveUseful(board, moveInfo.move, source.color, phase)) {
-                score -= 3000;
+                score -= 5000;
             }
         }
+        score -= cannonNaturalReliefPenalty(const_cast<ChessBoard&>(board), moveInfo.move, source.color) * 8;
+    }
+
+    if ((source.type == Rook || source.type == Cannon) && tactical.tradeScore < -40) {
+        score -= 220;
     }
 
     return score;
@@ -2118,10 +2929,12 @@ int AIPlayer::quiescence(ChessBoard& board, int alpha, int beta,
 
             // 当对方帅不太危险且敌方没有大举深入时，大幅限制将军步
             int maxChecks = MAX_QS_CHECKS;
-            if (oppDangerLevel < 30 && enemyDeep < 2) {
+            if (oppDangerLevel < 20 && enemyDeep == 0) {
+                maxChecks = 1; // 极安全：几乎不展开将军步
+            } else if (oppDangerLevel < 30 && enemyDeep < 2) {
                 maxChecks = 2; // 低危险：最多只考虑2个最佳将军步
             } else if (oppDangerLevel < 60) {
-                maxChecks = 4;
+                maxChecks = 3;
             }
 
             std::vector<Move> allMoves;
@@ -2397,6 +3210,11 @@ Move AIPlayer::getBestMove(ChessBoard& board) const {
     }
     if (rootLegalMoves.size() == 1) {
         return rootLegalMoves[0];
+    }
+
+    const Move openingMove = OpeningBook::chooseOpeningMove(board, rootLegalMoves);
+    if (!openingMove.isInvalid()) {
+        return openingMove;
     }
 
     allocateTimeBudget(board, static_cast<int>(rootLegalMoves.size()));

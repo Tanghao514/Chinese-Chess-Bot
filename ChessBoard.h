@@ -65,6 +65,8 @@ public:
     bool lastMoveWasCapture() const;
     // 棋盘上某方的非将帅子力总数
     int countMajorPieces(colorType c) const;
+    // 当前总手数（半回合），用于开局规则判断
+    int turnCount() const;
 
     void undoMove();
     bool exceedMaxPeaceState() const;

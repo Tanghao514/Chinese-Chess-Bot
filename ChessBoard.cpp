@@ -709,6 +709,10 @@ int ChessBoard::countMajorPieces(colorType c) const {
     return cnt;
 }
 
+int ChessBoard::turnCount() const {
+    return currTurnId_;
+}
+
 void ChessBoard::generateCaptures(std::vector<Move>& captures, bool mustDefend) {
     std::vector<Move> allMoves;
     generateMoves(allMoves, mustDefend);
