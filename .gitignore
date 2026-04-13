@@ -1,0 +1,10 @@
+.vscode/
+output/
+*.exe
+*.o
+*.obj
+*.out
+*.log
+*.tmp
+*.zip
+bot.cpp
