@@ -28,10 +28,15 @@ ChessBoard::ChessBoard() {
     resetBoard();
     continuePeaceTurn_.clear();
     lastMoveEaten_.clear();
+    hashHistory_.clear();
+
     continuePeaceTurn_.push_back(0);
     lastMoveEaten_.push_back(false);
     currColor_ = RED;
     currTurnId_ = 0;
+
+    currentHash_ = computeHash();
+    hashHistory_.push_back(currentHash_);
 }
 
 void ChessBoard::resetBoard() {
@@ -84,6 +89,18 @@ void ChessBoard::resetBoard() {
 
     state_.clear();
     state_.push_back(currState);
+    currentHash_ = 0;
+    for (int x = 0; x < BOARDWIDTH; x++) {
+        for (int y = 0; y < BOARDHEIGHT; y++) {
+            const Grid& g = state_[0][xy2pos(x, y)];
+            if (g.color != EMPTY) {
+                currentHash_ ^= zobristTable_[x][y][g.type][g.color];
+            }
+        }
+    }
+    if (currColor_ == BLACK) {
+        currentHash_ ^= zobristSide_;
+    }
 }
 
 void ChessBoard::generateMoves(std::vector<Move>& legalMoves, bool mustDefend) {
@@ -406,6 +423,18 @@ bool ChessBoard::makeMoveAssumeLegal(const Move& move) {
     auto& sourceGrid = state_[currTurnId_][xy2pos(move.source_x, move.source_y)];
     auto& targetGrid = state_[currTurnId_][xy2pos(move.target_x, move.target_y)];
 
+    const Grid sourceBefore = sourceGrid;
+    const Grid targetBefore = targetGrid;
+
+    uint64_t newHash = currentHash_;
+
+    if (sourceBefore.color != EMPTY) {
+        newHash ^= zobristTable_[move.source_x][move.source_y][sourceBefore.type][sourceBefore.color];
+    }
+    if (targetBefore.color != EMPTY) {
+        newHash ^= zobristTable_[move.target_x][move.target_y][targetBefore.type][targetBefore.color];
+    }
+
     if (targetGrid.color == oppColor()) {
         nextPeaceTurn = 0;
         lastMoveEaten_.push_back(true);
@@ -417,11 +446,18 @@ bool ChessBoard::makeMoveAssumeLegal(const Move& move) {
     targetGrid.color = sourceGrid.color;
     assert(sourceGrid.color == currColor_);
 
+    newHash ^= zobristTable_[move.target_x][move.target_y][targetGrid.type][targetGrid.color];
+
     sourceGrid.color = EMPTY;
     sourceGrid.type = None;
 
+    newHash ^= zobristSide_;
+
     continuePeaceTurn_.push_back(nextPeaceTurn);
     currColor_ = oppColor();
+
+    currentHash_ = newHash;
+    hashHistory_.push_back(currentHash_);
     return true;
 }
 
@@ -615,6 +651,9 @@ void ChessBoard::undoMove() {
     currColor_ = oppColor();
     continuePeaceTurn_.pop_back();
     lastMoveEaten_.pop_back();
+
+    hashHistory_.pop_back();
+    currentHash_ = hashHistory_.back();
 }
 
 bool ChessBoard::exceedMaxPeaceState() const {
@@ -652,17 +691,7 @@ void ChessBoard::printBoard() const {
 // =====================================================================
 
 uint64_t ChessBoard::computeHash() const {
-    uint64_t h = 0;
-    for (int x = 0; x < BOARDWIDTH; x++) {
-        for (int y = 0; y < BOARDHEIGHT; y++) {
-            const Grid& g = state_[currTurnId_][xy2pos(x, y)];
-            if (g.color != EMPTY) {
-                h ^= zobristTable_[x][y][g.type][g.color];
-            }
-        }
-    }
-    if (currColor_ == BLACK) h ^= zobristSide_;
-    return h;
+    return currentHash_;
 }
 
 bool ChessBoard::findKing(colorType c, int& kx, int& ky) const {
@@ -725,13 +754,15 @@ void ChessBoard::generateCaptures(std::vector<Move>& captures, bool mustDefend) 
 }
 
 void ChessBoard::makeNullMove() {
-    // 复制当前状态，交换走棋方，不移动任何棋子
     std::vector<Grid> copyState = state_[currTurnId_];
     state_.push_back(copyState);
     currTurnId_++;
     continuePeaceTurn_.push_back(continuePeaceTurn_[currTurnId_ - 1] + 1);
     lastMoveEaten_.push_back(false);
     currColor_ = oppColor();
+
+    currentHash_ ^= zobristSide_;
+    hashHistory_.push_back(currentHash_);
 }
 
 void ChessBoard::undoNullMove() {

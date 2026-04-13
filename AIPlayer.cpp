@@ -12,6 +12,42 @@ namespace {
 int countPiecesBetween(const ChessBoard& board, int sx, int sy, int ex, int ey);
 bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType side, int phase);
 
+bool isNearOpponentKing(colorType side, int x, int y) {
+    if (side == RED) {
+        return y >= 7 && x >= 2 && x <= 6;
+    } else {
+        return y <= 2 && x >= 2 && x <= 6;
+    }
+}
+
+bool isPalacePressureMove(const ChessBoard& board, const Move& move, colorType side) {
+    const Grid source = board.getGridAt(move.source_x, move.source_y);
+    if (source.type != Rook && source.type != Cannon && source.type != Knight && source.type != Pawn) {
+        return false;
+    }
+    return isNearOpponentKing(side, move.target_x, move.target_y);
+}
+
+bool isLikelyZugzwangLike(const ChessBoard& board, colorType side) {
+    int rooks = 0, cannons = 0, knights = 0, pawns = 0;
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side) continue;
+            switch (g.type) {
+                case Rook: ++rooks; break;
+                case Cannon: ++cannons; break;
+                case Knight: ++knights; break;
+                case Pawn: ++pawns; break;
+                default: break;
+            }
+        }
+    }
+    return (rooks == 0 && cannons == 0 && knights <= 1) ||
+           (rooks == 0 && cannons <= 1 && pawns <= 2);
+}
+
+
 int clampInt(int value, int low, int high) {
     return std::max(low, std::min(high, value));
 }
@@ -2826,13 +2862,9 @@ void AIPlayer::initSearchState() const {
 int AIPlayer::scoreQSearchCheckingMove(const ChessBoard& board, const Move& move,
                                        int qsDepth, int standPat, int alpha,
                                        int oppDangerLevel) const {
-    // 只在 qsDepth==0 且局面有一定紧张度时才展开非吃子将军步
-    // oppDangerLevel: 对方帅的danger, 越高说明局面越尖锐, 越值得搜将军
     if (qsDepth > 0) {
         return -INF_SCORE;
     }
-
-    // 如果对方 danger 很低（对方帅很安全），将军几乎无意义
     if (oppDangerLevel < 30 && standPat + 120 < alpha) {
         return -INF_SCORE;
     }
@@ -2848,41 +2880,58 @@ int AIPlayer::scoreQSearchCheckingMove(const ChessBoard& board, const Move& move
         return -INF_SCORE;
     }
 
-    int oppKingX = -1;
-    int oppKingY = -1;
+    int oppKingX = -1, oppKingY = -1;
     board.findKing(board.oppColor(), oppKingX, oppKingY);
 
-    int sc = 2000 + pieceBaseValue(source.type);
+    int sc = 2500 + pieceBaseValue(source.type);
 
-    // 危险程度越高，将军奖励越大
-    if (oppDangerLevel >= 60) {
-        sc += 400;
-    } else if (oppDangerLevel >= 30) {
-        sc += 150;
-    }
+    if (oppDangerLevel >= 80) sc += 700;
+    else if (oppDangerLevel >= 60) sc += 450;
+    else if (oppDangerLevel >= 30) sc += 180;
 
     if (oppKingX >= 0) {
         const int dist = std::abs(move.target_x - oppKingX) + std::abs(move.target_y - oppKingY);
         if (dist <= 3) {
-            sc += (4 - dist) * 120;
+            sc += (4 - dist) * 140;
         }
-    }
 
-    // 抽将潜力：将军步目标位置同行/列有对方高价值子
-    if (oppKingX >= 0) {
-        const int tx = move.target_x;
-        const int ty = move.target_y;
         if (source.type == Rook) {
-            // 车将军：看是否在将军后能抽到大子
-            if (tx == oppKingX && countPiecesBetween(board, tx, ty, oppKingX, oppKingY) == 0) {
+            if (move.target_x == oppKingX &&
+                countPiecesBetween(board, move.target_x, move.target_y, oppKingX, oppKingY) == 0) {
+                sc += 300;
                 for (int fx = 0; fx < BOARDWIDTH; ++fx) {
-                    if (fx == tx) continue;
-                    const Grid tg = board.getGridAt(fx, ty);
-                    if (tg.color == board.oppColor() && (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
-                        sc += 500;
+                    if (fx == move.target_x) continue;
+                    const Grid tg = board.getGridAt(fx, move.target_y);
+                    if (tg.color == board.oppColor() &&
+                        (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
+                        sc += 700;
                         break;
                     }
                 }
+            }
+            if (move.target_y == oppKingY &&
+                countPiecesBetween(board, move.target_x, move.target_y, oppKingX, oppKingY) == 0) {
+                sc += 300;
+            }
+        }
+
+        if (source.type == Cannon) {
+            if (move.target_x == oppKingX) {
+                int between = countPiecesBetween(board, move.target_x, move.target_y, oppKingX, oppKingY);
+                if (between == 1) sc += 650;
+                else if (between == 0) sc += 420;
+            }
+            if (move.target_y == oppKingY) {
+                int between = countPiecesBetween(board, move.target_x, move.target_y, oppKingX, oppKingY);
+                if (between == 1) sc += 550;
+            }
+        }
+
+        if (source.type == Knight) {
+            const int dx = std::abs(move.target_x - oppKingX);
+            const int dy = std::abs(move.target_y - oppKingY);
+            if ((dx == 2 && dy == 1) || (dx == 1 && dy == 2)) {
+                sc += 420;
             }
         }
     }
@@ -2919,46 +2968,43 @@ int AIPlayer::quiescence(ChessBoard& board, int alpha, int beta,
         board.generateCaptures(moves);
 
         // 只在 qsDepth==0 时考虑非吃子将军步，且受局面危险控制
-        if (qsDepth == 0 && standPat + 96 >= alpha) {
-            // 计算对方帅危险等级，控制将军展开的积极程度
+                if (qsDepth == 0 && standPat + 96 >= alpha) {
             const KingDangerInfo oppDanger = analyzeKingDanger(board, board.oppColor());
             const int oppDangerLevel = oppDanger.totalDanger;
-
-            // 对方深入我方的大子数
             const int enemyDeep = countEnemyDeepMajors(board, board.currentColor());
 
-            // 当对方帅不太危险且敌方没有大举深入时，大幅限制将军步
             int maxChecks = MAX_QS_CHECKS;
             if (oppDangerLevel < 20 && enemyDeep == 0) {
-                maxChecks = 1; // 极安全：几乎不展开将军步
-            } else if (oppDangerLevel < 30 && enemyDeep < 2) {
-                maxChecks = 2; // 低危险：最多只考虑2个最佳将军步
+                maxChecks = 1;
+            } else if (oppDangerLevel < 35 && enemyDeep < 2) {
+                maxChecks = 2;
             } else if (oppDangerLevel < 60) {
-                maxChecks = 3;
+                maxChecks = 4;
+            } else {
+                maxChecks = 6;
             }
 
             std::vector<Move> allMoves;
             board.generateMoves(allMoves);
             std::vector<std::pair<int, Move>> checkingMoves;
             checkingMoves.reserve(allMoves.size());
+
             for (const auto& mv : allMoves) {
-                if (board.isCapture(mv)) {
-                    continue;
-                }
+                if (board.isCapture(mv)) continue;
                 const int sc = scoreQSearchCheckingMove(board, mv, qsDepth, standPat, alpha, oppDangerLevel);
                 if (sc > 0) {
                     checkingMoves.push_back(std::make_pair(sc, mv));
                 }
             }
+
             std::sort(checkingMoves.begin(), checkingMoves.end(), [](const auto& lhs, const auto& rhs) {
                 return lhs.first > rhs.first;
             });
+
             int added = 0;
             for (const auto& item : checkingMoves) {
                 moves.push_back(item.second);
-                if (++added >= maxChecks) {
-                    break;
-                }
+                if (++added >= maxChecks) break;
             }
         }
     }
@@ -3062,31 +3108,54 @@ int AIPlayer::alphaBeta(ChessBoard& board, int depth, int alpha, int beta,
         }
     }
 
-    if (allowNull && !pvNode && !inCheck &&
-        depth >= NULL_MOVE_MIN_DEPTH &&
-        board.countMajorPieces(board.currentColor()) >= 4) {
-        int reduction = 2 + (depth >= 6 ? 1 : 0) + (depth >= 10 ? 1 : 0);
-        if (reduction > depth - 1) {
-            reduction = depth - 1;
-        }
-        board.makeNullMove();
-        const int nullScore = -alphaBeta(board, depth - 1 - reduction, -beta, -beta + 1,
-                                         ply + 1, false, !cutNode);
-        board.undoNullMove();
-        if (timeUp_) {
-            return 0;
-        }
-        if (nullScore >= beta) {
-            if (depth >= 8) {
-                const int verify = alphaBeta(board, depth - 1 - reduction, alpha, beta, ply, false, false);
-                if (verify >= beta) {
-                    return beta;
-                }
-            } else {
+    const colorType side = board.currentColor();
+const KingDangerInfo selfDanger = analyzeKingDanger(board, side);
+const bool nullUnsafe =
+    isLikelyZugzwangLike(board, side) ||
+    selfDanger.totalDanger >= 70 ||
+    selfDanger.directRookPressure > 0 ||
+    selfDanger.directCannonPressure > 0 ||
+    selfDanger.bottomCannonThreat > 0 ||
+    selfDanger.rookCannonThreat > 0 ||
+    selfDanger.wocaoThreat > 0 ||
+    countEnemyDeepMajors(board, side) >= 2;
+
+if (allowNull && !pvNode && !inCheck &&
+    depth >= NULL_MOVE_MIN_DEPTH &&
+    board.countMajorPieces(board.currentColor()) >= 4 &&
+    !nullUnsafe) {
+    int reduction = 2 + (depth >= 6 ? 1 : 0) + (depth >= 10 ? 1 : 0);
+
+    // 局面危险时宁可少减一点，降低误剪风险
+    if (selfDanger.totalDanger >= 45) {
+        reduction = std::max(1, reduction - 1);
+    }
+
+    if (reduction > depth - 1) {
+        reduction = depth - 1;
+    }
+
+    board.makeNullMove();
+    const int nullScore = -alphaBeta(board, depth - 1 - reduction, -beta, -beta + 1,
+                                     ply + 1, false, !cutNode);
+    board.undoNullMove();
+
+    if (timeUp_) {
+        return 0;
+    }
+
+    if (nullScore >= beta) {
+        // 深层时保留验证搜索，但在危险局面下更谨慎
+        if (depth >= 8 || selfDanger.totalDanger >= 45) {
+            const int verify = alphaBeta(board, depth - 1 - reduction, alpha, beta, ply, false, false);
+            if (verify >= beta) {
                 return beta;
             }
+        } else {
+            return beta;
         }
     }
+}
 
     std::vector<Move> moves;
     board.generateMoves(moves);
@@ -3131,7 +3200,13 @@ int AIPlayer::alphaBeta(ChessBoard& board, int depth, int alpha, int beta,
             sc = -alphaBeta(board, depth - 1, -beta, -alpha, ply + 1, true, false);
         } else {
             int newDepth = depth - 1;
-            if (!inCheck && !isCapture && !givesCheck &&
+                        const bool palacePressure = isPalacePressureMove(board, mv, source.color);
+            const bool tacticalEscape =
+                (source.type == Rook || source.type == Cannon || source.type == Knight) &&
+                const_cast<ChessBoard&>(board).attacked(ChessBoard::oppColor(source.color),
+                                                        mv.source_x, mv.source_y);
+            const int phase = endgamePhase(board);
+            if (!inCheck && !isCapture && !givesCheck && !palacePressure && !tacticalEscape &&
                 depth >= LMR_MIN_DEPTH && movesSearched >= LMR_MIN_MOVES) {
                 int reduction = lmrTable[std::min(depth, 63)][std::min(movesSearched, 63)];
                 if (cutNode) {
@@ -3141,6 +3216,9 @@ int AIPlayer::alphaBeta(ChessBoard& board, int depth, int alpha, int beta,
                     reduction = std::max(0, reduction - 1);
                 }
                 if (source.type == King || source.type == Assistant || source.type == Bishop) {
+                    reduction = std::max(0, reduction - 1);
+                }
+                if (phase < 110) {
                     reduction = std::max(0, reduction - 1);
                 }
                 newDepth = std::max(1, depth - 1 - reduction);

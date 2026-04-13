@@ -15,9 +15,13 @@ private:
 
     // Zobrist 哈希相关
     static bool zobristInited_;
-    static uint64_t zobristTable_[BOARDWIDTH][BOARDHEIGHT][8][3]; // [x][y][pieceType][color]
-    static uint64_t zobristSide_; // 走棋方哈希
+    static uint64_t zobristTable_[BOARDWIDTH][BOARDHEIGHT][8][3];
+    static uint64_t zobristSide_;
     static void initZobrist();
+
+    // 增量哈希
+    uint64_t currentHash_;
+    std::vector<uint64_t> hashHistory_;
 
 public:
     ChessBoard();
