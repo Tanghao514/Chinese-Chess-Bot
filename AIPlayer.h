@@ -1,112 +1,96 @@
 #ifndef AIPLAYER_H
 #define AIPLAYER_H
-
 #include "ChessBoard.h"
 #include <chrono>
 #include <cstdint>
 #include <vector>
 
-// 置换表条目
-enum TTFlag : uint8_t {
-    TT_EXACT      = 0,
-    TT_LOWERBOUND = 1,
-    TT_UPPERBOUND = 2
-};
-
 struct TTEntry {
-    uint64_t key;
-    int16_t  depth;
-    int32_t  score;
-    Move     bestMove;
-    TTFlag   flag;
-    uint8_t  age;
+    uint32_t dwLock0;
+    uint16_t wmvPacked;
+    uint8_t  ucAlphaDepth;
+    uint8_t  ucBetaDepth;
+    int16_t  svlAlpha;
+    int16_t  svlBeta;
+    uint32_t dwLock1;
 
     TTEntry()
-        : key(0), depth(-1), score(0), bestMove(), flag(TT_EXACT), age(0) {}
+        : dwLock0(0),
+          wmvPacked(0),
+          ucAlphaDepth(0),
+          ucBetaDepth(0),
+          svlAlpha(0),
+          svlBeta(0),
+          dwLock1(0) {}
 };
 
-// 中国象棋传统搜索引擎
 class AIPlayer {
 public:
     AIPlayer();
     Move getBestMove(ChessBoard& board) const;
 
 private:
+    // ============================================================
+    // Core constants
+    // ============================================================
     static constexpr int MAX_DEPTH = 64;
-    static constexpr int DEFAULT_DEPTH = 14;
-    static constexpr int INF_SCORE = 1000000;
-    static constexpr int MATE_SCORE = 900000;
-    static constexpr int DRAW_SCORE = 0;
+    static constexpr int DEFAULT_DEPTH = 64;
 
-    static constexpr int HARD_TIME_BASE_MS = 860;
-    static constexpr int HARD_TIME_MIN_MS = 780;
-    static constexpr int HARD_TIME_MAX_MS = 900;
-    static constexpr int SOFT_TIME_BASE_MS = 540;
-    static constexpr int SOFT_TIME_MIN_MS = 420;
-    static constexpr int SOFT_TIME_MAX_MS = 680;
-    static constexpr int TIME_CHECK_MASK = 255;
+    static constexpr int INF_SCORE  = 1000000;
+    static constexpr int MATE_SCORE = 900000;
+    static constexpr int WIN_SCORE  = MATE_SCORE - 200;
+    static constexpr int DRAW_VALUE = 20;
+    static constexpr int BAN_SCORE  = MATE_SCORE - 100;
 
     static constexpr int TT_SIZE_BITS = 20;
-    static constexpr int TT_SIZE = 1 << TT_SIZE_BITS;
-    static constexpr int TT_MASK = TT_SIZE - 1;
+    static constexpr int TT_SIZE      = 1 << TT_SIZE_BITS;
+    static constexpr int TT_MASK      = TT_SIZE - 1;
+    static constexpr int HASH_LAYERS  = 2;
 
-    static constexpr int NULL_MOVE_MIN_DEPTH = 3;
-    static constexpr int LMR_MIN_DEPTH = 3;
-    static constexpr int LMR_MIN_MOVES = 3;
+    static constexpr int NULL_DEPTH       = 2;
+    static constexpr int UNCHANGED_DEPTH  = 4;
+    static constexpr int IID_REDUCE       = 2;
+    static constexpr int DROPDOWN_VALUE   = 20;
+    static constexpr int MAX_KILLERS      = 4;
+    static constexpr int MAX_QS_DEPTH     = 8;
+    static constexpr int TIME_CHECK_MASK  = 4095;
 
-    static constexpr int FUTILITY_MARGIN_1 = 150;
-    static constexpr int FUTILITY_MARGIN_2 = 280;
-    static constexpr int FUTILITY_MARGIN_3 = 420;
-    static constexpr int RAZOR_MARGIN = 260;
+    static constexpr int HARD_TIME_BASE_MS = 950;
+    static constexpr int HARD_TIME_MIN_MS  = 900;
+    static constexpr int HARD_TIME_MAX_MS  = 980;
+    static constexpr int SOFT_TIME_BASE_MS = 700;
+    static constexpr int SOFT_TIME_MIN_MS  = 600;
+    static constexpr int SOFT_TIME_MAX_MS  = 800;
 
-    static constexpr int ASP_WINDOW = 28;
-    static constexpr int MAX_ASP_RESEARCH = 3;
-    static constexpr int MAX_KILLERS = 2;
-    static constexpr int MAX_QS_DEPTH = 8;
-    static constexpr int MAX_QS_CHECKS = 6;
-
-    struct KingDangerInfo {
-        int kingX = -1;
-        int kingY = -1;
-        int guardCount = 0;
-        int bishopCount = 0;
-        int palaceDefenders = 0;
-        int frontOpen = 0;
-        int centerFileOpen = 0;
-        int sideFilePressure = 0;
-        int currentSquareDanger = 0;
-        int safePalaceSquares = 0;
-        int attackedPalaceSquares = 0;
-        int escapeImprovement = 0;
-        int bottomCannonThreat = 0;
-        int bottomCannonSide = 0;
-        int rookCannonThreat = 0;
-        int directRookPressure = 0;
-        int directCannonPressure = 0;
-        int horseThreat = 0;
-        int wocaoThreat = 0;
-        int shijiaoThreat = 0;
-        int doubleCheckLanes = 0;
-        int pawnStorm = 0;
-        int totalDanger = 0;
-    };
+    // Eye hash flags
+    static constexpr int HASH_ALPHA = 1;
+    static constexpr int HASH_BETA  = 2;
+    static constexpr int HASH_PV    = HASH_ALPHA | HASH_BETA;
 
     struct RootMoveInfo {
         Move move;
-        int staticScore = 0;
-        int lastScore = 0;
-        int searchedDepth = 0;
+        int  lastScore;
+        int  searchedDepth;
+        int  rootOrder;
+
+        RootMoveInfo()
+            : move(),
+              lastScore(0),
+              searchedDepth(0),
+              rootOrder(1) {}
     };
 
-    // 可变搜索状态
+    // ============================================================
+    // Mutable search state
+    // ============================================================
     mutable std::vector<TTEntry> tt_;
     mutable Move killers_[MAX_DEPTH][MAX_KILLERS];
     mutable int history_[2][BOARDWIDTH * BOARDHEIGHT][BOARDWIDTH * BOARDHEIGHT];
     mutable Move counterMoves_[2][BOARDWIDTH * BOARDHEIGHT][BOARDWIDTH * BOARDHEIGHT];
+
     mutable std::chrono::steady_clock::time_point searchStart_;
     mutable bool timeUp_;
     mutable int nodesSearched_;
-    mutable uint8_t searchAge_;
     mutable int allocatedTimeMs_;
     mutable int softTimeMs_;
     mutable int hardTimeMs_;
@@ -115,72 +99,101 @@ private:
     mutable int bestMoveChanges_;
     mutable Move prevMove_[MAX_DEPTH];
 
-    // 核心搜索
-    int alphaBeta(ChessBoard& board, int depth, int alpha, int beta,
-                  int ply, bool allowNull, bool cutNode) const;
+    // ============================================================
+    // Search main line (Eye-style split)
+    // ============================================================
     int quiescence(ChessBoard& board, int alpha, int beta,
                    int ply, int qsDepth) const;
-    bool checkTime() const;
-    bool softTimeUp() const;
-    int elapsedMs() const;
-    void allocateTimeBudget(const ChessBoard& board, int rootMoveCount) const;
-    bool shouldStopForNextDepth(int depth, int rootMoveCount) const;
 
-    // 评估函数（保持结构化）
-    int evaluate(const ChessBoard& board) const;
-    int evalMaterial(const ChessBoard& board, colorType side, int phase) const;
+    int searchCut(ChessBoard& board, int beta, int depth,
+                  int ply, bool noNull) const;
+
+    int searchPV(ChessBoard& board, int alpha, int beta, int depth,
+                 int ply, std::vector<Move>& pvLine) const;
+
+    int searchPVFast(ChessBoard& board, int alpha, int beta, int depth,
+                 int ply, Move pvBuf[], int& pvLen) const;
+
+    bool searchUnique(ChessBoard& board,
+                      const std::vector<RootMoveInfo>& rootMoves,
+                      const Move& bestMove,
+                      int beta,
+                      int depth) const;
+
+    int harmlessPruning(const ChessBoard& board, int beta, int ply) const;
+
+    // ============================================================
+    // Evaluation
+    // ============================================================
+    int evaluate(const ChessBoard& board, int vlAlpha, int vlBeta) const;
     int evalPosition(const ChessBoard& board, colorType side) const;
-    int evalKingSafety(const ChessBoard& board, colorType side) const;
-    int evalMobility(const ChessBoard& board, colorType side, int phase) const;
-    int evalPawnStructure(const ChessBoard& board, colorType side) const;
-    int evalPawnAdvancement(const ChessBoard& board, colorType side, int phase) const;
-    int evalAttackPressure(const ChessBoard& board, colorType side) const;
-    int evalDevelopment(const ChessBoard& board, colorType side, int phase) const;
-    int evalPieceActivity(const ChessBoard& board, colorType side, int phase) const;
 
-    KingDangerInfo analyzeKingDanger(const ChessBoard& board, colorType side) const;
-    int scoreSquareDanger(const ChessBoard& board, colorType side, int x, int y) const;
+    int advisorShapeScore(const ChessBoard& board, colorType side) const;
+    int stringHoldScore(const ChessBoard& board, colorType side) const;
+    int rookMobilityScore(const ChessBoard& board, colorType side) const;
+    int knightTrapScore(const ChessBoard& board, colorType side) const;
 
-    // 辅助：统计对方深入我方半场的大子数
-    int countEnemyDeepMajors(const ChessBoard& board, colorType side) const;
-
-    static int pieceValueMg(stoneType t);
-    static int pieceValueEg(stoneType t);
-    static int pieceBaseValue(stoneType t);
-    static int positionValue(stoneType t, colorType c, int x, int y);
     static int endgamePhase(const ChessBoard& board);
 
-    // 走法排序
-    void orderMoves(const ChessBoard& board, std::vector<Move>& moves,
-                    int ply, const Move& ttMove) const;
-    int scoreMoveForOrdering(const ChessBoard& board, const Move& move,
-                             int ply, const Move& ttMove,
-                             int oppKingX, int oppKingY,
-                             int phase, bool sideInCheck) const;
-    void orderRootMoves(const ChessBoard& board, std::vector<RootMoveInfo>& moves,
-                        const Move& pvMove, int currentDanger) const;
-    int scoreRootMove(const ChessBoard& board, const RootMoveInfo& moveInfo,
-                      const Move& pvMove, int currentDanger, int phase) const;
-    int scoreQSearchCheckingMove(const ChessBoard& board, const Move& move,
-                                 int qsDepth, int standPat, int alpha,
-                                 int oppDangerLevel) const;
+    // ============================================================
+    // Move ordering
+    // ============================================================
+    void orderMoves(const ChessBoard& board,
+                    std::vector<Move>& moves,
+                    int ply,
+                    const Move& ttMove) const;
+    
+    void orderMoveArray(const ChessBoard& board,
+                    Move moves[],
+                    int count,
+                    int ply,
+                    const Move& ttMove) const;
 
-    // 置换表操作
-    void ttStore(uint64_t key, int depth, int score, TTFlag flag,
-                 const Move& bestMove, int ply) const;
-    bool ttProbe(uint64_t key, int depth, int alpha, int beta,
-                 int& score, Move& ttMove, int ply) const;
-    int scoreToTT(int score, int ply) const;
-    int scoreFromTT(int score, int ply) const;
+    void orderRootMoves(const ChessBoard& board,
+                        std::vector<RootMoveInfo>& moves,
+                        const Move& pvMove) const;
 
-    // Killer / History / Counter-move
+    void updateRootOrder(std::vector<RootMoveInfo>& moves,
+                         const Move& bestMove) const;
+
+    // ============================================================
+    // TT / score conversion
+    // ============================================================
+    void ttStore(const ChessBoard& board, int nFlag, int vl,
+                 int nDepth, const Move& mv) const;
+
+    int ttProbe(const ChessBoard& board, int vlAlpha, int vlBeta,
+                int nDepth, bool bNoNull, Move& ttMove) const;
+
+    int scoreToTT(const ChessBoard& board, int vl) const;
+    int scoreFromTT(const ChessBoard& board, int vl) const;
+
+    static uint16_t packMove(const Move& mv);
+    static Move unpackMove(uint16_t wmv);
+
+    // ============================================================
+    // History / killer / counter
+    // ============================================================
     void updateKiller(int ply, const Move& mv) const;
     void updateHistory(colorType side, const Move& mv, int depth) const;
     void updateCounterMove(colorType side, const Move& prev, const Move& cur) const;
+
     bool isKiller(int ply, const Move& mv) const;
     bool isCounterMove(colorType side, const Move& prev, const Move& mv) const;
 
+    // ============================================================
+    // Time / root control
+    // ============================================================
+    bool checkTime() const;
+    bool softTimeUp() const;
+    int elapsedMs() const;
+
+    void allocateTimeBudget(const ChessBoard& board, int rootMoveCount) const;
+    bool shouldStopForNextDepth(int depth, int rootMoveCount) const;
+
+    int drawValue(int ply) const;
+    int repValue(int repStatus, int ply) const;
+
     void initSearchState() const;
 };
-
 #endif

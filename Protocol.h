@@ -1,6 +1,5 @@
-﻿#ifndef PROTOCOL_H
+#ifndef PROTOCOL_H
 #define PROTOCOL_H
-
 #include "Common.h"
 #include <string>
 #include <vector>
@@ -36,5 +35,4 @@ private:
     static bool parseMoveObject(const Json::Value& value, ProtocolMoveEntry& entry);
     static std::string posToString(int x, int y);
 };
-
 #endif

@@ -1,480 +1,36 @@
 #include "AIPlayer.h"
-#include "OpeningBook.h"
-#include "TacticalRules.h"
-
+#include "MoveBook.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <iostream>
 #include <utility>
 
 namespace {
 
+// Utility helpers
+inline int homeRank(colorType side) { return side == RED ? 0 : 9; }
+inline int forwardDir(colorType side) { return side == RED ? 1 : -1; }
+inline bool crossedRiver(colorType side, int y) { return side == RED ? y >= 5 : y <= 4; }
+inline int initialCannonRank(colorType side) { return side == RED ? 2 : 7; }
+inline int initialPawnRank(colorType side) { return side == RED ? 3 : 6; }
+inline int clampInt(int value, int low, int high) { return std::max(low, std::min(high, value)); }
+
 int countPiecesBetween(const ChessBoard& board, int sx, int sy, int ex, int ey);
-bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType side, int phase);
 
-int clampInt(int value, int low, int high) {
-    return std::max(low, std::min(high, value));
+#ifdef CHESS_DEBUG_DECISION_TRACE
+std::string traceMoveString(const Move& move) {
+    if (move.isInvalid()) {
+        return "-1";
+    }
+    std::string s;
+    s += pgnint2char(move.source_x);
+    s += int2char(move.source_y);
+    s += pgnint2char(move.target_x);
+    s += int2char(move.target_y);
+    return s;
 }
-
-int homeRank(colorType side) {
-    return side == RED ? 0 : 9;
-}
-
-int palaceMinRank(colorType side) {
-    return side == RED ? 0 : 7;
-}
-
-int palaceMaxRank(colorType side) {
-    return side == RED ? 2 : 9;
-}
-
-int forwardDir(colorType side) {
-    return side == RED ? 1 : -1;
-}
-
-int advanceOf(colorType side, int y) {
-    return side == RED ? y : (9 - y);
-}
-
-bool crossedRiver(colorType side, int y) {
-    return side == RED ? y >= 5 : y <= 4;
-}
-
-bool inPalace(colorType side, int x, int y) {
-    return x >= 3 && x <= 5 && y >= palaceMinRank(side) && y <= palaceMaxRank(side);
-}
-
-int initialCannonRank(colorType side) {
-    return side == RED ? 2 : 7;
-}
-
-int initialPawnRank(colorType side) {
-    return side == RED ? 3 : 6;
-}
-
-bool isInitialRookSquare(colorType side, int x, int y) {
-    return y == homeRank(side) && (x == 0 || x == 8);
-}
-
-bool isInitialKnightSquare(colorType side, int x, int y) {
-    return y == homeRank(side) && (x == 1 || x == 7);
-}
-
-bool isNormalKnightSquare(colorType side, int x, int y) {
-    return advanceOf(side, y) == 2 && (x == 2 || x == 6);
-}
-
-int flankIndexFromFile(int x) {
-    if (x <= 3) {
-        return 0;
-    }
-    if (x >= 5) {
-        return 1;
-    }
-    return -1;
-}
-
-bool onFlank(int x, int flank) {
-    return flank == 0 ? (x <= 3) : (x >= 5);
-}
-
-bool isDevelopedRook(colorType side, int x, int y) {
-    return advanceOf(side, y) >= 2 || x == 3 || x == 4 || x == 5;
-}
-
-bool isDevelopedKnight(colorType side, int x, int y) {
-    return !(y == homeRank(side) && (x == 1 || x == 7));
-}
-
-// 炮是否已经离开初始位置
-bool isDevelopedCannon(colorType side, int x, int y) {
-    const int cannonRow = initialCannonRank(side);
-    return !(y == cannonRow && (x == 1 || x == 7));
-}
-
-int countKnightJumpOptions(const ChessBoard& board, colorType side, int x, int y) {
-    int jumps = 0;
-    for (int d = 0; d < 8; ++d) {
-        const int tx = x + dx_knight[d];
-        const int ty = y + dy_knight[d];
-        if (!ChessBoard::inBoard(tx, ty)) {
-            continue;
-        }
-        const int footX = x + dx_knight_foot[d];
-        const int footY = y + dy_knight_foot[d];
-        if (board.getGridAt(footX, footY).color != EMPTY) {
-            continue;
-        }
-        if (board.getGridAt(tx, ty).color == side) {
-            continue;
-        }
-        ++jumps;
-    }
-    return jumps;
-}
-
-int countKnightForwardJumps(const ChessBoard& board, colorType side, int x, int y) {
-    int jumps = 0;
-    const int sourceAdvance = advanceOf(side, y);
-    for (int d = 0; d < 8; ++d) {
-        const int tx = x + dx_knight[d];
-        const int ty = y + dy_knight[d];
-        if (!ChessBoard::inBoard(tx, ty)) {
-            continue;
-        }
-        const int footX = x + dx_knight_foot[d];
-        const int footY = y + dy_knight_foot[d];
-        if (board.getGridAt(footX, footY).color != EMPTY) {
-            continue;
-        }
-        if (board.getGridAt(tx, ty).color == side) {
-            continue;
-        }
-        if (advanceOf(side, ty) > sourceAdvance) {
-            ++jumps;
-        }
-    }
-    return jumps;
-}
-
-int countKnightBlockedLegs(const ChessBoard& board, int x, int y) {
-    int blocked = 0;
-    if (ChessBoard::inBoard(x - 1, y) && board.getGridAt(x - 1, y).color != EMPTY) {
-        ++blocked;
-    }
-    if (ChessBoard::inBoard(x + 1, y) && board.getGridAt(x + 1, y).color != EMPTY) {
-        ++blocked;
-    }
-    if (ChessBoard::inBoard(x, y - 1) && board.getGridAt(x, y - 1).color != EMPTY) {
-        ++blocked;
-    }
-    if (ChessBoard::inBoard(x, y + 1) && board.getGridAt(x, y + 1).color != EMPTY) {
-        ++blocked;
-    }
-    return blocked;
-}
-
-int flankPawnAdvanceSteps(const ChessBoard& board, colorType side, int fileX) {
-    const int startAdvance = advanceOf(side, initialPawnRank(side));
-    int bestAdvance = startAdvance;
-    for (int y = 0; y < BOARDHEIGHT; ++y) {
-        const Grid g = board.getGridAt(fileX, y);
-        if (g.color == side && g.type == Pawn) {
-            bestAdvance = std::max(bestAdvance, advanceOf(side, y));
-        }
-    }
-    return std::max(0, bestAdvance - startAdvance);
-}
-
-bool flankPawnAdvanced(const ChessBoard& board, colorType side, int fileX) {
-    return flankPawnAdvanceSteps(board, side, fileX) >= 1;
-}
-
-bool flankPawnActivatesKnight(const ChessBoard& board, colorType side, int knightX, int knightY, int pawnFileX) {
-    if (!isNormalKnightSquare(side, knightX, knightY)) {
-        return false;
-    }
-    if (!flankPawnAdvanced(board, side, pawnFileX)) {
-        return false;
-    }
-    const int jumpCount = countKnightJumpOptions(board, side, knightX, knightY);
-    const int forwardJumps = countKnightForwardJumps(board, side, knightX, knightY);
-    return jumpCount >= 4 || forwardJumps >= 2;
-}
-
-bool isNaturalRookDevelopmentMove(colorType side, const Move& move) {
-    const int homeY = homeRank(side);
-    if (move.source_y != homeY) {
-        return false;
-    }
-
-    const bool fromCorner = (move.source_x == 0 || move.source_x == 8);
-    if (fromCorner) {
-        if (move.target_x == move.source_x && advanceOf(side, move.target_y) >= 1) {
-            return true;
-        }
-        if (move.target_y == homeY &&
-            (move.target_x == 1 || move.target_x == 7 || move.target_x == 3 || move.target_x == 5)) {
-            return true;
-        }
-    }
-
-    if (move.target_y == homeY && (move.target_x == 3 || move.target_x == 5)) {
-        return true;
-    }
-    if (move.target_x == move.source_x && advanceOf(side, move.target_y) >= 2) {
-        return true;
-    }
-    return false;
-}
-
-bool isMeaninglessEarlyRookShift(colorType side, const Move& move) {
-    if (move.source_y != homeRank(side) || move.target_y != homeRank(side)) {
-        return false;
-    }
-    if (isNaturalRookDevelopmentMove(side, move)) {
-        return false;
-    }
-    return move.source_x != move.target_x;
-}
-
-int rookFileQuality(const ChessBoard& board, colorType side, int fileX) {
-    bool ownPawn = false;
-    bool oppPawn = false;
-    const colorType opp = ChessBoard::oppColor(side);
-    for (int y = 0; y < BOARDHEIGHT; ++y) {
-        const Grid g = board.getGridAt(fileX, y);
-        if (g.type != Pawn) {
-            continue;
-        }
-        if (g.color == side) {
-            ownPawn = true;
-        } else if (g.color == opp) {
-            oppPawn = true;
-        }
-    }
-    if (!ownPawn && !oppPawn) {
-        return 2;
-    }
-    if (!ownPawn && oppPawn) {
-        return 1;
-    }
-    return 0;
-}
-
-int bishopDevelopmentReplyPotential(const ChessBoard& board, colorType side, int flank) {
-    int best = 0;
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != side || g.type != Bishop) {
-                continue;
-            }
-            if (!onFlank(x, flank) && x != 4) {
-                continue;
-            }
-            for (int d = 0; d < 4; ++d) {
-                const int tx = x + dx_bishop[d];
-                const int ty = y + dy_bishop[d];
-                const int eyeX = x + dx_bishop_eye[d];
-                const int eyeY = y + dy_bishop_eye[d];
-                if (!ChessBoard::inBoard(tx, ty) || !ChessBoard::inColorArea(tx, ty, side)) {
-                    continue;
-                }
-                if (board.getGridAt(eyeX, eyeY).color != EMPTY || board.getGridAt(tx, ty).color != EMPTY) {
-                    continue;
-                }
-
-                int improve = 0;
-                if (std::abs(tx - 4) < std::abs(x - 4)) {
-                    improve += 6;
-                }
-                if (advanceOf(side, ty) > advanceOf(side, y)) {
-                    improve += 4;
-                }
-                if (tx == 4) {
-                    improve += 4;
-                }
-                best = std::max(best, improve);
-            }
-        }
-    }
-    return best;
-}
-
-int flankDefenseScore(const ChessBoard& board, colorType side, int flank) {
-    int score = 0;
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != side) {
-                continue;
-            }
-
-            const bool mainFlank = onFlank(x, flank);
-            switch (g.type) {
-                case Rook:
-                    score += mainFlank ? 6 : (x == 4 ? 2 : 0);
-                    break;
-                case Cannon:
-                    score += mainFlank ? 5 : (x == 4 ? 2 : 0);
-                    break;
-                case Knight:
-                    score += mainFlank ? 5 : (x == 4 ? 1 : 0);
-                    break;
-                case Bishop:
-                case Assistant:
-                    score += (mainFlank || x == 4) ? 2 : 0;
-                    break;
-                case Pawn:
-                    if (mainFlank) {
-                        score += crossedRiver(side, y) ? 2 : 1;
-                    }
-                    break;
-                case King:
-                    score += (x == 4 || mainFlank) ? 1 : 0;
-                    break;
-                default:
-                    break;
-            }
-        }
-    }
-    return score;
-}
-
-int weakerFlank(const ChessBoard& board, colorType defender) {
-    const int left = flankDefenseScore(board, defender, 0);
-    const int right = flankDefenseScore(board, defender, 1);
-    if (std::abs(left - right) < 3) {
-        return -1;
-    }
-    return left < right ? 0 : 1;
-}
-
-int attackTowardsWeakerFlankBonus(const ChessBoard& board, colorType attacker,
-                                  int x, int y, stoneType type) {
-    if (type != Rook && type != Knight && type != Cannon) {
-        return 0;
-    }
-
-    if (type == Rook && !isDevelopedRook(attacker, x, y)) {
-        return 0;
-    }
-    if (type == Knight && !isDevelopedKnight(attacker, x, y)) {
-        return 0;
-    }
-    if (type == Cannon && x != 4 && advanceOf(attacker, y) < 2) {
-        return 0;
-    }
-
-    const colorType defender = ChessBoard::oppColor(attacker);
-    const int weakFlank = weakerFlank(board, defender);
-    if (weakFlank < 0) {
-        return 0;
-    }
-
-    const int leftDefense = flankDefenseScore(board, defender, 0);
-    const int rightDefense = flankDefenseScore(board, defender, 1);
-    const int diff = std::abs(leftDefense - rightDefense);
-    const int pieceFlank = flankIndexFromFile(x);
-    const int base = (type == Rook) ? 14 : (type == Cannon ? 12 : 10);
-
-    if (pieceFlank < 0) {
-        if (x == 4 && (type == Rook || type == Cannon) && advanceOf(attacker, y) >= 2) {
-            return 4 + diff;
-        }
-        return 0;
-    }
-
-    if (pieceFlank == weakFlank) {
-        return base + diff * 2 + (advanceOf(attacker, y) >= 5 ? 4 : 0);
-    }
-    if (advanceOf(attacker, y) >= 4) {
-        return -(base / 2) - diff;
-    }
-    return 0;
-}
-
-bool cannonAttacksTargetOnLine(const ChessBoard& board, int cannonX, int cannonY, int targetX, int targetY) {
-    return ChessBoard::inSameStraightLine(cannonX, cannonY, targetX, targetY) &&
-           countPiecesBetween(board, cannonX, cannonY, targetX, targetY) == 1;
-}
-
-bool cannonPressesFlankKnight(const ChessBoard& board, colorType attacker, int cannonX, int cannonY, int flank) {
-    const colorType defender = ChessBoard::oppColor(attacker);
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != defender || g.type != Knight || !onFlank(x, flank)) {
-                continue;
-            }
-            if (cannonAttacksTargetOnLine(board, cannonX, cannonY, x, y)) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-bool cannonOnlyHarassesFlankPawn(const ChessBoard& board, colorType attacker, int cannonX, int cannonY, int flank) {
-    const colorType defender = ChessBoard::oppColor(attacker);
-    bool attacksFlankPawn = false;
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != defender || g.type != Pawn || !onFlank(x, flank)) {
-                continue;
-            }
-            if ((x == 2 || x == 6) && cannonAttacksTargetOnLine(board, cannonX, cannonY, x, y)) {
-                attacksFlankPawn = true;
-            }
-        }
-    }
-    if (!attacksFlankPawn) {
-        return false;
-    }
-    return !cannonPressesFlankKnight(board, attacker, cannonX, cannonY, flank);
-}
-
-int cannonNaturalReliefPenalty(ChessBoard& board, const Move& move, colorType side) {
-    const Grid source = board.getGridAt(move.source_x, move.source_y);
-    if (source.type != Cannon) {
-        return 0;
-    }
-
-    const int flank = flankIndexFromFile(move.target_x);
-    if (flank < 0 || advanceOf(side, move.target_y) < 3) {
-        return 0;
-    }
-
-    board.makeMoveAssumeLegal(move);
-    const colorType defender = board.currentColor();
-    const int bishopReply = bishopDevelopmentReplyPotential(board, defender, flank);
-    const bool pressesKnight = cannonPressesFlankKnight(board, side, move.target_x, move.target_y, flank);
-    const bool onlyHarassPawn = cannonOnlyHarassesFlankPawn(board, side, move.target_x, move.target_y, flank);
-
-    int penalty = 0;
-    if (pressesKnight) {
-        penalty += 120;
-        if (bishopReply >= 6) {
-            penalty += 220;
-        }
-    }
-    if (onlyHarassPawn) {
-        penalty += 140;
-        if (bishopReply >= 4) {
-            penalty += 140;
-        }
-    }
-    if (!isCannonMoveUseful(board, move, side, 256) && bishopReply > 0) {
-        penalty += 80 + bishopReply * 5;
-    }
-
-    board.undoMove();
-    return penalty;
-}
-
-bool isClassicWocaoSquare(colorType defender, int x, int y) {
-    if (defender == RED) {
-        return ((x == 3 || x == 5) && y == 2) || ((x == 2 || x == 6) && y == 1);
-    }
-    return ((x == 3 || x == 5) && y == 7) || ((x == 2 || x == 6) && y == 8);
-}
-
-bool isClassicShijiaoSquare(colorType defender, int x, int y) {
-    if (defender == RED) {
-        return y == 2 && (x == 2 || x == 6);
-    }
-    return y == 7 && (x == 2 || x == 6);
-}
-
-bool isBacktrack(const Move& newer, const Move& older) {
-    return !older.isInvalid() &&
-           newer.source_x == older.target_x &&
-           newer.source_y == older.target_y &&
-           newer.target_x == older.source_x &&
-           newer.target_y == older.source_y;
-}
+#endif
 
 int countPiecesBetween(const ChessBoard& board, int sx, int sy, int ex, int ey) {
     if (sx == ex && sy == ey) {
@@ -500,67 +56,182 @@ int countPiecesBetween(const ChessBoard& board, int sx, int sy, int ex, int ey) 
     return count;
 }
 
-bool knightAttacksSquare(const ChessBoard& board, int knightX, int knightY, int targetX, int targetY) {
-    for (int d = 0; d < 8; ++d) {
-        if (knightX + dx_knight[d] != targetX || knightY + dy_knight[d] != targetY) {
-            continue;
+int exchangeBaseValue(stoneType t) {
+    switch (t) {
+        case King:      return 5;
+        case Assistant: return 1;
+        case Bishop:    return 1;
+        case Knight:    return 3;
+        case Rook:      return 4;
+        case Cannon:    return 3;
+        case Pawn:      return 2;
+        default:        return 0;
+    }
+}
+static int valuableStringLevel(stoneType t) {
+    switch (t) {
+        case Knight: return 2;
+        case Cannon: return 1;
+        default:     return 0;
+    }
+}
+
+static int stringHoldValueByDistance(int dist) {
+    if (dist <= 0) {
+        return 0;
+    }
+    const int v = 8 + dist * 4;
+    return (v > 40 ? 40 : v);
+}
+static bool protectedSquareForExchange(const ChessBoard& board,
+                                       colorType side,
+                                       int tx, int ty,
+                                       int exceptX = -1,
+                                       int exceptY = -1) {
+    auto isExcept = [&](int x, int y) -> bool {
+        return x == exceptX && y == exceptY;
+    };
+
+    // 1. 如果目标格在己方半场
+    if (homeRank(side) == 0 ? (ty <= 4) : (ty >= 5)) {
+        if (ChessBoard::inKingArea(tx, ty, side)) {
+            // 将/帅保护
+            for (int d = 0; d < 4; ++d) {
+                const int sx = tx + dx_strai[d];
+                const int sy = ty + dy_strai[d];
+                if (!ChessBoard::inBoard(sx, sy) || isExcept(sx, sy)) continue;
+                const Grid g = board.getGridAt(sx, sy);
+                if (g.color == side && g.type == King &&
+                    ChessBoard::inKingArea(sx, sy, side)) {
+                    return true;
+                }
+            }
+
+            // 士保护
+            for (int d = 0; d < 4; ++d) {
+                const int sx = tx + dx_ob[d];
+                const int sy = ty + dy_ob[d];
+                if (!ChessBoard::inBoard(sx, sy) || isExcept(sx, sy)) continue;
+                const Grid g = board.getGridAt(sx, sy);
+                if (g.color == side && g.type == Assistant &&
+                    ChessBoard::inKingArea(sx, sy, side)) {
+                    return true;
+                }
+            }
         }
-        const int footX = knightX + dx_knight_foot[d];
-        const int footY = knightY + dy_knight_foot[d];
-        if (board.getGridAt(footX, footY).color == EMPTY) {
+
+        // 象保护
+        for (int d = 0; d < 4; ++d) {
+            const int sx = tx + dx_bishop[d];
+            const int sy = ty + dy_bishop[d];
+            if (!ChessBoard::inBoard(sx, sy) || isExcept(sx, sy)) continue;
+            if (!ChessBoard::inColorArea(sx, sy, side)) continue;
+
+            const int ex = tx + dx_bishop_eye[d];
+            const int ey = ty + dy_bishop_eye[d];
+            const Grid g = board.getGridAt(sx, sy);
+            if (g.color == side && g.type == Bishop &&
+                board.getGridAt(ex, ey).color == EMPTY) {
+                return true;
+            }
+        }
+    } else {
+        // 2. 过河兵横向保护
+        for (int d = 0; d < 2; ++d) {
+            const int sx = tx + dx_lr[d];
+            const int sy = ty;
+            if (!ChessBoard::inBoard(sx, sy) || isExcept(sx, sy)) continue;
+            const Grid g = board.getGridAt(sx, sy);
+            if (g.color == side && g.type == Pawn &&
+                crossedRiver(side, sy)) {
+                return true;
+            }
+        }
+    }
+
+    // 3. 兵纵向保护（从目标格往己方后方找）
+    {
+        const int sy = ty - (side == RED ? 1 : -1);
+        const int sx = tx;
+        if (ChessBoard::inBoard(sx, sy) && !isExcept(sx, sy)) {
+            const Grid g = board.getGridAt(sx, sy);
+            if (g.color == side && g.type == Pawn) {
+                return true;
+            }
+        }
+    }
+
+    // 4. 马保护
+    for (int d = 0; d < 8; ++d) {
+        const int sx = tx - dx_knight[d];
+        const int sy = ty - dy_knight[d];
+        if (!ChessBoard::inBoard(sx, sy) || isExcept(sx, sy)) continue;
+
+        const int fx = sx + dx_knight_foot[d];
+        const int fy = sy + dy_knight_foot[d];
+        if (!ChessBoard::inBoard(fx, fy)) continue;
+
+        const Grid g = board.getGridAt(sx, sy);
+        if (g.color == side && g.type == Knight &&
+            board.getGridAt(fx, fy).color == EMPTY) {
             return true;
         }
     }
+
+    // 5. 车保护
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            if ((x == tx && y == ty) || isExcept(x, y)) continue;
+            const Grid g = board.getGridAt(x, y);
+            if (g.color == side && g.type == Rook &&
+                ChessBoard::inSameStraightLine(x, y, tx, ty) &&
+                board.betweenNotEmptyNum(x, y, tx, ty) == 0) {
+                return true;
+            }
+        }
+    }
+
+    // 6. 炮保护
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            if ((x == tx && y == ty) || isExcept(x, y)) continue;
+            const Grid g = board.getGridAt(x, y);
+            if (g.color == side && g.type == Cannon &&
+                ChessBoard::inSameStraightLine(x, y, tx, ty) &&
+                board.betweenNotEmptyNum(x, y, tx, ty) == 1) {
+                return true;
+            }
+        }
+    }
+
     return false;
 }
 
-// 判断炮的移动是否形成了有意义的战术构型（中路/空头炮/炮架/对敌将线）
-bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType side, int /*phase*/) {
-    const int tx = move.target_x;
-    const int ty = move.target_y;
-    const colorType opp = ChessBoard::oppColor(side);
-
-    // 中炮位置
-    if (tx == 4) return true;
-
-    // 对准对方帅的线路
-    int oppKX = -1, oppKY = -1;
-    board.findKing(opp, oppKX, oppKY);
-    if (oppKX >= 0) {
-        if (tx == oppKX || ty == oppKY) {
-            // 在同一线上且有炮架 => 有威胁
-            if (tx == oppKX) {
-                int between = countPiecesBetween(board, tx, ty, oppKX, oppKY);
-                if (between == 1) return true; // 有炮架，形成威胁
-                if (between == 0) return true; // 空头压制
-            }
-            if (ty == oppKY) {
-                int between = countPiecesBetween(board, tx, ty, oppKX, oppKY);
-                if (between == 1) return true;
-            }
-        }
+static int mvvLvaForMove(const ChessBoard& board, const Move& mv, colorType side) {
+    if (!board.isCapture(mv)) {
+        return 0;
     }
 
-    // 肋道炮（3路或5路）需要有实际配合才有用
-    if (tx == 3 || tx == 5) {
-        // 同列有己方车 → 车炮配合
-        for (int fy = 0; fy < BOARDHEIGHT; ++fy) {
-            if (fy == ty) continue;
-            const Grid g = board.getGridAt(tx, fy);
-            if (g.color == side && g.type == Rook) return true;
-        }
-        // 肋道且深入对方阵地接近帅 → 有压制价值
-        int advLocal = advanceOf(side, ty);
-        if (oppKX >= 0 && std::abs(tx - oppKX) <= 1 && advLocal >= 7) {
-            return true;
-        }
+    const Grid source = board.getGridAt(mv.source_x, mv.source_y);
+    const Grid target = board.getGridAt(mv.target_x, mv.target_y);
+    if (target.color == EMPTY) {
+        return 0;
     }
 
-    // 沉底炮位置（进入对方底线/二线附近）
-    int adv = advanceOf(side, ty);
-    if (adv >= 8) return true; // 沉底
+    const int mvv = exchangeBaseValue(target.type);
+    const int lva = exchangeBaseValue(source.type);
 
-    return false;
+    const int lvaAdjust =
+        protectedSquareForExchange(board, ChessBoard::oppColor(side),
+                                   mv.target_x, mv.target_y) ? lva : 0;
+
+    if (mvv >= lvaAdjust) {
+        return mvv - lvaAdjust + 1;
+    }
+
+    // Eye: 吃到车马炮，或者吃到己方半场上的子，即便表面亏，也给 1
+    const bool onHomeHalf = (side == RED ? (mv.target_y <= 4) : (mv.target_y >= 5));
+    return (mvv >= 3 || onHomeHalf) ? 1 : 0;
 }
 
 } // namespace
@@ -568,110 +239,504 @@ bool isCannonMoveUseful(const ChessBoard& board, const Move& move, colorType sid
 // =====================================================================
 // PST（红方视角，x=0..8, y=0..9）
 // =====================================================================
-static const int PST_PAWN[BOARDWIDTH][BOARDHEIGHT] = {
-    {  0,  0,  0,  0,  2,  1,  1,  1,  1, -5},
-    {  0,  0,  0,  0,  1,  3,  3,  3,  4, -5},
-    {  0,  0,  0,  0,  4,  6,  6,  8, 10, -5},
-    {  0,  0,  0,  0,  6,  8, 10, 10, 14, -5},
-    {  0,  0,  0,  0,  8, 10, 12, 12, 12, -6},
-    {  0,  0,  0,  0,  6,  8, 10, 10, 14, -5},
-    {  0,  0,  0,  0,  4,  6,  8,  8, 10, -5},
-    {  0,  0,  0,  0,  1,  3,  3,  3,  4, -5},
-    {  0,  0,  0,  0,  2,  1,  1,  1,  1, -5}
+// 1. 开中局、有进攻机会的帅(将)和兵(卒)，参照“梦入神蛋”
+static const uint8_t cucvlKingPawnMidgameAttacking[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  9,  9,  9, 11, 13, 11,  9,  9,  9,  0,  0,  0,  0,
+  0,  0,  0, 39, 49, 69, 84, 89, 84, 69, 49, 39,  0,  0,  0,  0,
+  0,  0,  0, 39, 49, 64, 74, 74, 74, 64, 49, 39,  0,  0,  0,  0,
+  0,  0,  0, 39, 46, 54, 59, 61, 59, 54, 46, 39,  0,  0,  0,  0,
+  0,  0,  0, 29, 37, 41, 54, 59, 54, 41, 37, 29,  0,  0,  0,  0,
+  0,  0,  0,  7,  0, 13,  0, 16,  0, 13,  0,  7,  0,  0,  0,  0,
+  0,  0,  0,  7,  0,  7,  0, 15,  0,  7,  0,  7,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  1,  1,  1,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  2,  2,  2,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0, 11, 15, 11,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 };
 
-static const int PST_KNIGHT[BOARDWIDTH][BOARDHEIGHT] = {
-    {-15,  0,  8, -4,  2,  2,  0,  8, -2,  0},
-    { -8,-10,  6,  0,  5,  0, 10,  4,  4,  4},
-    { -5, -4, 10, -2, 15,  4,  6,  8, 15,  2},
-    { -4,  6,  4, -1,  8,  8, 10, 10,  4,  2},
-    {-30, -5,  0,  8,  7,  2,  8,  8,  0,  0},
-    { -4,  6,  4, -1,  8,  8, 10, 10,  4,  2},
-    { -5, -4, 10, -2, 15,  4,  6,  8, 15,  2},
-    { -8,-10,  6,  0,  5,  0, 10,  4,  4,  4},
-    {-15,  0,  8, -4,  2,  2,  0,  8, -2,  0}
+// 2. 开中局、没有进攻机会的帅(将)和兵(卒)
+static const uint8_t cucvlKingPawnMidgameAttackless[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  9,  9,  9, 11, 13, 11,  9,  9,  9,  0,  0,  0,  0,
+  0,  0,  0, 19, 24, 34, 42, 44, 42, 34, 24, 19,  0,  0,  0,  0,
+  0,  0,  0, 19, 24, 32, 37, 37, 37, 32, 24, 19,  0,  0,  0,  0,
+  0,  0,  0, 19, 23, 27, 29, 30, 29, 27, 23, 19,  0,  0,  0,  0,
+  0,  0,  0, 14, 18, 20, 27, 29, 27, 20, 18, 14,  0,  0,  0,  0,
+  0,  0,  0,  7,  0, 13,  0, 16,  0, 13,  0,  7,  0,  0,  0,  0,
+  0,  0,  0,  7,  0,  7,  0, 15,  0,  7,  0,  7,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  1,  1,  1,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  2,  2,  2,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0, 11, 15, 11,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 };
 
-static const int PST_ROOK[BOARDWIDTH][BOARDHEIGHT] = {
-    {  0,  6,  4,  2,  6,  6,  7,  0,  0,  4},
-    {  8, 10,  6,  2, 12,  8, 12,  8, 10,  6},
-    {  6,  4,  4,  2, 14,  0, 10,  6,  6,  5},
-    {  9, 14,  8,  2, 12, 10, 12,  6, 10,  8},
-    { -5, -4, -3,  2,  4,  3, 11,  2, -4, -6},
-    {  9, 14,  8,  2, 12, 10, 12,  6, 10,  8},
-    {  6,  4,  4,  2, 14,  0, 10,  6,  6,  5},
-    {  8, 10,  6,  2, 12,  8, 12,  8, 10,  6},
-    {  0,  6,  4,  2,  6,  6,  7,  0,  0,  4}
+// 3. 残局、有进攻机会的帅(将)和兵(卒)
+static const uint8_t cucvlKingPawnEndgameAttacking[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0, 10, 10, 10, 15, 15, 15, 10, 10, 10,  0,  0,  0,  0,
+  0,  0,  0, 50, 55, 60, 85,100, 85, 60, 55, 50,  0,  0,  0,  0,
+  0,  0,  0, 65, 70, 70, 75, 75, 75, 70, 70, 65,  0,  0,  0,  0,
+  0,  0,  0, 75, 80, 80, 80, 80, 80, 80, 80, 75,  0,  0,  0,  0,
+  0,  0,  0, 70, 70, 65, 70, 70, 70, 65, 70, 70,  0,  0,  0,  0,
+  0,  0,  0, 45,  0, 40, 45, 45, 45, 40,  0, 45,  0,  0,  0,  0,
+  0,  0,  0, 40,  0, 35, 40, 40, 40, 35,  0, 40,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  5,  5, 15,  5,  5,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  3,  3, 13,  3,  3,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  1,  1, 11,  1,  1,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 };
 
-static const int PST_CANNON[BOARDWIDTH][BOARDHEIGHT] = {
-    { -8,  4, 10,  2,  4,  6,  8,  7,  6, 14},
-    {  2,  6,  6,  2,  8,  8,  8,  6,  6, 14},
-    {  4,  4, 12,  2,  6,  2,  6,  7,  4,  6},
-    {  6,  0, 12,  2,  4,  2,  6,  8,  6,  8},
-    {-15,  6, 15,  6,  8,  6, 12,  8,  4,-10},
-    {  6,  0, 12,  2,  4,  2,  6,  8,  6,  8},
-    {  4,  4, 12,  2,  6,  2,  6,  7,  4,  6},
-    {  2,  6,  6,  2,  8,  8,  8,  6,  6, 14},
-    { -8,  4, 10,  2,  4,  6,  8,  7,  6, 14}
+// 4. 残局、没有进攻机会的帅(将)和兵(卒)
+static const uint8_t cucvlKingPawnEndgameAttackless[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0, 10, 10, 10, 15, 15, 15, 10, 10, 10,  0,  0,  0,  0,
+  0,  0,  0, 10, 15, 20, 45, 60, 45, 20, 15, 10,  0,  0,  0,  0,
+  0,  0,  0, 25, 30, 30, 35, 35, 35, 30, 30, 25,  0,  0,  0,  0,
+  0,  0,  0, 35, 40, 40, 45, 45, 45, 40, 40, 35,  0,  0,  0,  0,
+  0,  0,  0, 25, 30, 30, 35, 35, 35, 30, 30, 25,  0,  0,  0,  0,
+  0,  0,  0, 25,  0, 25, 25, 25, 25, 25,  0, 25,  0,  0,  0,  0,
+  0,  0,  0, 20,  0, 20, 20, 20, 20, 20,  0, 20,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  5,  5, 13,  5,  5,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  3,  3, 12,  3,  3,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  1,  1, 11,  1,  1,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 };
 
-static const int PST_BISHOP[BOARDWIDTH][BOARDHEIGHT] = {
-    { 0, 0, 4, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 6, 0, 0, 0, 2, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 10,0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 6, 0, 0, 0, 2, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 4, 0, 0, 0, 0, 0, 0, 0}
+// 5. 没受威胁的仕(士)和相(象)
+static const uint8_t cucvlAdvisorBishopThreatless[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0, 20,  0,  0,  0, 20,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0, 18,  0,  0, 20, 23, 20,  0,  0, 18,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0, 23,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0, 20, 20,  0, 20, 20,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 };
 
-static const int PST_GUARD[BOARDWIDTH][BOARDHEIGHT] = {
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 5, 0, 3, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 8, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 5, 0, 3, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+// 5'. 可升变的，没受威胁的仕(士)和相(象)
+static const uint8_t cucvlAdvisorBishopPromotionThreatless[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0, 30,  0,  0,  0, 30,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0, 28,  0,  0, 30, 33, 30,  0,  0, 28,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0, 33,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0, 30, 30,  0, 30, 30,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 };
 
-static const int PST_KING[BOARDWIDTH][BOARDHEIGHT] = {
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {10, 8, 2, 0, 0, 0, 0, 0, 0, 0},
-    {20, 5, 3, 0, 0, 0, 0, 0, 0, 0},
-    {10, 8, 2, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
-    {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+// 6. 受到威胁的仕(士)和相(象)，参照“梦入神蛋”
+static const uint8_t cucvlAdvisorBishopThreatened[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0, 40,  0,  0,  0, 40,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0, 38,  0,  0, 40, 43, 40,  0,  0, 38,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0, 43,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0, 40, 40,  0, 40, 40,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
 };
 
-// =====================================================================
-// LMR 表
-// =====================================================================
-static int lmrTable[64][64];
-static struct LMRInit {
-    LMRInit() {
-        for (int d = 0; d < 64; ++d) {
-            for (int m = 0; m < 64; ++m) {
-                lmrTable[d][m] = static_cast<int>(0.5 + std::log(d + 1.0) * std::log(m + 1.0) / 2.5);
-            }
+// 7. 开中局的马，参照“梦入神蛋”
+static const uint8_t cucvlKnightMidgame[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0, 90, 90, 90, 96, 90, 96, 90, 90, 90,  0,  0,  0,  0,
+  0,  0,  0, 90, 96,103, 97, 94, 97,103, 96, 90,  0,  0,  0,  0,
+  0,  0,  0, 92, 98, 99,103, 99,103, 99, 98, 92,  0,  0,  0,  0,
+  0,  0,  0, 93,108,100,107,100,107,100,108, 93,  0,  0,  0,  0,
+  0,  0,  0, 90,100, 99,103,104,103, 99,100, 90,  0,  0,  0,  0,
+  0,  0,  0, 90, 98,101,102,103,102,101, 98, 90,  0,  0,  0,  0,
+  0,  0,  0, 92, 94, 98, 95, 98, 95, 98, 94, 92,  0,  0,  0,  0,
+  0,  0,  0, 93, 92, 94, 95, 92, 95, 94, 92, 93,  0,  0,  0,  0,
+  0,  0,  0, 85, 90, 92, 93, 78, 93, 92, 90, 85,  0,  0,  0,  0,
+  0,  0,  0, 88, 85, 90, 88, 90, 88, 90, 85, 88,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+};
+
+// 8. 残局的马
+static const uint8_t cucvlKnightEndgame[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0, 92, 94, 96, 96, 96, 96, 96, 94, 92,  0,  0,  0,  0,
+  0,  0,  0, 94, 96, 98, 98, 98, 98, 98, 96, 94,  0,  0,  0,  0,
+  0,  0,  0, 96, 98,100,100,100,100,100, 98, 96,  0,  0,  0,  0,
+  0,  0,  0, 96, 98,100,100,100,100,100, 98, 96,  0,  0,  0,  0,
+  0,  0,  0, 96, 98,100,100,100,100,100, 98, 96,  0,  0,  0,  0,
+  0,  0,  0, 94, 96, 98, 98, 98, 98, 98, 96, 94,  0,  0,  0,  0,
+  0,  0,  0, 94, 96, 98, 98, 98, 98, 98, 96, 94,  0,  0,  0,  0,
+  0,  0,  0, 92, 94, 96, 96, 96, 96, 96, 94, 92,  0,  0,  0,  0,
+  0,  0,  0, 90, 92, 94, 92, 92, 92, 94, 92, 90,  0,  0,  0,  0,
+  0,  0,  0, 88, 90, 92, 90, 90, 90, 92, 90, 88,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+};
+
+// 9. 开中局的车，参照“梦入神蛋”
+static const uint8_t cucvlRookMidgame[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,206,208,207,213,214,213,207,208,206,  0,  0,  0,  0,
+  0,  0,  0,206,212,209,216,233,216,209,212,206,  0,  0,  0,  0,
+  0,  0,  0,206,208,207,214,216,214,207,208,206,  0,  0,  0,  0,
+  0,  0,  0,206,213,213,216,216,216,213,213,206,  0,  0,  0,  0,
+  0,  0,  0,208,211,211,214,215,214,211,211,208,  0,  0,  0,  0,
+  0,  0,  0,208,212,212,214,215,214,212,212,208,  0,  0,  0,  0,
+  0,  0,  0,204,209,204,212,214,212,204,209,204,  0,  0,  0,  0,
+  0,  0,  0,198,208,204,212,212,212,204,208,198,  0,  0,  0,  0,
+  0,  0,  0,200,208,206,212,200,212,206,208,200,  0,  0,  0,  0,
+  0,  0,  0,194,206,204,212,200,212,204,206,194,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+};
+
+// 10. 残局的车
+static const uint8_t cucvlRookEndgame[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,182,182,182,184,186,184,182,182,182,  0,  0,  0,  0,
+  0,  0,  0,184,184,184,186,190,186,184,184,184,  0,  0,  0,  0,
+  0,  0,  0,182,182,182,184,186,184,182,182,182,  0,  0,  0,  0,
+  0,  0,  0,180,180,180,182,184,182,180,180,180,  0,  0,  0,  0,
+  0,  0,  0,180,180,180,182,184,182,180,180,180,  0,  0,  0,  0,
+  0,  0,  0,180,180,180,182,184,182,180,180,180,  0,  0,  0,  0,
+  0,  0,  0,180,180,180,182,184,182,180,180,180,  0,  0,  0,  0,
+  0,  0,  0,180,180,180,182,184,182,180,180,180,  0,  0,  0,  0,
+  0,  0,  0,180,180,180,182,184,182,180,180,180,  0,  0,  0,  0,
+  0,  0,  0,180,180,180,182,184,182,180,180,180,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+};
+
+// 11. 开中局的炮，参照“梦入神蛋”
+static const uint8_t cucvlCannonMidgame[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,100,100, 96, 91, 90, 91, 96,100,100,  0,  0,  0,  0,
+  0,  0,  0, 98, 98, 96, 92, 89, 92, 96, 98, 98,  0,  0,  0,  0,
+  0,  0,  0, 97, 97, 96, 91, 92, 91, 96, 97, 97,  0,  0,  0,  0,
+  0,  0,  0, 96, 99, 99, 98,100, 98, 99, 99, 96,  0,  0,  0,  0,
+  0,  0,  0, 96, 96, 96, 96,100, 96, 96, 96, 96,  0,  0,  0,  0,
+  0,  0,  0, 95, 96, 99, 96,100, 96, 99, 96, 95,  0,  0,  0,  0,
+  0,  0,  0, 96, 96, 96, 96, 96, 96, 96, 96, 96,  0,  0,  0,  0,
+  0,  0,  0, 97, 96,100, 99,101, 99,100, 96, 97,  0,  0,  0,  0,
+  0,  0,  0, 96, 97, 98, 98, 98, 98, 98, 97, 96,  0,  0,  0,  0,
+  0,  0,  0, 96, 96, 97, 99, 99, 99, 97, 96, 96,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+};
+
+// 12. 残局的炮
+static const uint8_t cucvlCannonEndgame[256] = {
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,100,100,100,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,100,100,100,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,100,100,100,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,102,104,102,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,102,104,102,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,102,104,102,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,102,104,102,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,102,104,102,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,104,106,104,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,100,100,100,104,106,104,100,100,100,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0
+};
+
+static const int cvlHollowThreat[16] = {
+   0,  0,  0,  0,  0,  0, 60, 65, 70, 75, 80, 80, 80,  0,  0,  0
+};
+
+static const int cvlCentralThreat[16] = {
+   0,  0,  0,  0,  0,  0, 50, 45, 40, 35, 30, 30, 30,  0,  0,  0
+};
+
+static const int cvlBottomThreat[16] = {
+   0,  0,  0, 40, 30,  0,  0,  0,  0,  0, 30, 40,  0,  0,  0,  0
+};
+
+// ================================================================
+//  ElephantEye-style dynamic PST state
+// ================================================================
+
+static constexpr int EYE_ROOK_MIDGAME_VALUE = 6;
+static constexpr int EYE_KNIGHT_CANNON_MIDGAME_VALUE = 3;
+static constexpr int EYE_OTHER_MIDGAME_VALUE = 1;
+static constexpr int EYE_TOTAL_MIDGAME_VALUE =
+    EYE_ROOK_MIDGAME_VALUE * 4 +
+    EYE_KNIGHT_CANNON_MIDGAME_VALUE * 8 +
+    EYE_OTHER_MIDGAME_VALUE * 18;
+static constexpr int EYE_TOTAL_ATTACK_VALUE = 8;
+
+struct EyePstState {
+    int midgameValue = 0;
+    int redAttack = 0;
+    int blackAttack = 0;
+};
+
+static inline int eyeSqFromRedXY(int x, int redY) {
+    // Eye 16x16 board:
+    // file = 3 + x
+    // rank = 12 - redY   (redY=0 是红方底线，映到 Eye 的 rank 12)
+    return (3 + x) + ((12 - redY) << 4);
+}
+
+static inline int eyeTbl9x10(const uint8_t tbl[256], int x, int redY) {
+    return static_cast<int>(tbl[eyeSqFromRedXY(x, redY)]);
+}
+
+static inline int clampEyeAttack(int v) {
+    if (v < 0) return 0;
+    if (v > EYE_TOTAL_ATTACK_VALUE) return EYE_TOTAL_ATTACK_VALUE;
+    return v;
+}
+
+static inline int lerpEye(int mg, int eg, int midgameValue) {
+    return (mg * midgameValue + eg * (EYE_TOTAL_MIDGAME_VALUE - midgameValue)) / EYE_TOTAL_MIDGAME_VALUE;
+}
+
+static EyePstState buildEyePstState(const ChessBoard& board) {
+    EyePstState st;
+
+    int nMidgameValue = 0;
+    int nRedAttacks = 0;
+    int nBlackAttacks = 0;
+    int nRedSimpleValue = 0;
+    int nBlackSimpleValue = 0;
+
+    // Iterate over all 32 pieces via Eye dual tables
+    for (int pc = 16; pc < 48; ++pc) {
+        int sq = board.squareOf(pc);
+        if (sq == 0) continue;
+        int pt = PIECE_TYPE_EYE(pc);
+        if (pt == 0) continue; // King — skip for midgame/attack calc
+
+        stoneType t = eyePtToStone(pt);
+        colorType c = (pc < 32) ? RED : BLACK;
+        int y = sq2y(sq);
+
+        switch (t) {
+            case Rook:   nMidgameValue += EYE_ROOK_MIDGAME_VALUE; break;
+            case Knight: case Cannon: nMidgameValue += EYE_KNIGHT_CANNON_MIDGAME_VALUE; break;
+            default:     nMidgameValue += EYE_OTHER_MIDGAME_VALUE; break;
+        }
+
+        const bool redAttackingHalf = (c == RED && y >= 5);
+        const bool blackAttackingHalf = (c == BLACK && y <= 4);
+
+        if (redAttackingHalf) {
+            if (t == Rook || t == Knight) nRedAttacks += 2;
+            else if (t == Cannon || t == Pawn) nRedAttacks += 1;
+        }
+        if (blackAttackingHalf) {
+            if (t == Rook || t == Knight) nBlackAttacks += 2;
+            else if (t == Cannon || t == Pawn) nBlackAttacks += 1;
+        }
+
+        if (c == RED) {
+            if (t == Rook) nRedSimpleValue += 2;
+            else if (t == Knight || t == Cannon) nRedSimpleValue += 1;
+        } else {
+            if (t == Rook) nBlackSimpleValue += 2;
+            else if (t == Knight || t == Cannon) nBlackSimpleValue += 1;
         }
     }
-} lmrInit_;
+
+    nMidgameValue =
+        (2 * EYE_TOTAL_MIDGAME_VALUE - nMidgameValue) * nMidgameValue / EYE_TOTAL_MIDGAME_VALUE;
+    if (nMidgameValue < 0) nMidgameValue = 0;
+    if (nMidgameValue > EYE_TOTAL_MIDGAME_VALUE) nMidgameValue = EYE_TOTAL_MIDGAME_VALUE;
+
+    if (nRedSimpleValue > nBlackSimpleValue) {
+        nRedAttacks += (nRedSimpleValue - nBlackSimpleValue) * 2;
+    } else {
+        nBlackAttacks += (nBlackSimpleValue - nRedSimpleValue) * 2;
+    }
+
+    st.midgameValue = nMidgameValue;
+    st.redAttack = clampEyeAttack(nRedAttacks);
+    st.blackAttack = clampEyeAttack(nBlackAttacks);
+    return st;
+}
+
+static int dynamicPstValue(const EyePstState& st,
+                           stoneType t, colorType c, int x, int y) {
+    const int redY = (c == RED) ? y : (9 - y);
+
+    switch (t) {
+        case King: {
+            const int mg = eyeTbl9x10(cucvlKingPawnMidgameAttacking, x, redY);
+            const int eg = eyeTbl9x10(cucvlKingPawnEndgameAttacking, x, redY);
+            return lerpEye(mg, eg, st.midgameValue);
+        }
+
+        case Pawn: {
+            const int attack = (c == RED) ? st.redAttack : st.blackAttack;
+
+            const int mgAttack = eyeTbl9x10(cucvlKingPawnMidgameAttacking, x, redY);
+            const int egAttack = eyeTbl9x10(cucvlKingPawnEndgameAttacking, x, redY);
+            const int mgQuiet  = eyeTbl9x10(cucvlKingPawnMidgameAttackless, x, redY);
+            const int egQuiet  = eyeTbl9x10(cucvlKingPawnEndgameAttackless, x, redY);
+
+            const int attackVal = lerpEye(mgAttack, egAttack, st.midgameValue);
+            const int quietVal  = lerpEye(mgQuiet,  egQuiet,  st.midgameValue);
+
+            return (attackVal * attack +
+                    quietVal * (EYE_TOTAL_ATTACK_VALUE - attack)) / EYE_TOTAL_ATTACK_VALUE;
+        }
+
+        case Assistant:
+        case Bishop: {
+            // 红方士象看黑方攻势，黑方士象看红方攻势
+            const int threat = (c == RED) ? st.blackAttack : st.redAttack;
+            const int threatened = eyeTbl9x10(cucvlAdvisorBishopThreatened, x, redY);
+            const int threatless = eyeTbl9x10(cucvlAdvisorBishopThreatless, x, redY);
+            return (threatened * threat +
+                    threatless * (EYE_TOTAL_ATTACK_VALUE - threat)) / EYE_TOTAL_ATTACK_VALUE;
+        }
+
+        case Knight: {
+            const int mg = eyeTbl9x10(cucvlKnightMidgame, x, redY);
+            const int eg = eyeTbl9x10(cucvlKnightEndgame, x, redY);
+            return lerpEye(mg, eg, st.midgameValue);
+        }
+
+        case Rook: {
+            const int mg = eyeTbl9x10(cucvlRookMidgame, x, redY);
+            const int eg = eyeTbl9x10(cucvlRookEndgame, x, redY);
+            return lerpEye(mg, eg, st.midgameValue);
+        }
+
+        case Cannon: {
+            const int mg = eyeTbl9x10(cucvlCannonMidgame, x, redY);
+            const int eg = eyeTbl9x10(cucvlCannonEndgame, x, redY);
+            return lerpEye(mg, eg, st.midgameValue);
+        }
+
+        default:
+            return 0;
+    }
+}
+
+int pstValueRaw(stoneType t, colorType c, int x, int y) {
+    const int redY = (c == RED) ? y : (9 - y);
+
+    // 这里只是轻量 fallback，不承担真正总评估
+    constexpr int neutralMidgame = EYE_TOTAL_MIDGAME_VALUE / 2;
+
+    switch (t) {
+        case King: {
+            const int mg = eyeTbl9x10(cucvlKingPawnMidgameAttacking, x, redY);
+            const int eg = eyeTbl9x10(cucvlKingPawnEndgameAttacking, x, redY);
+            return lerpEye(mg, eg, neutralMidgame);
+        }
+        case Pawn: {
+            const int mg = eyeTbl9x10(cucvlKingPawnMidgameAttackless, x, redY);
+            const int eg = eyeTbl9x10(cucvlKingPawnEndgameAttackless, x, redY);
+            return lerpEye(mg, eg, neutralMidgame);
+        }
+        case Assistant:
+        case Bishop:
+            return eyeTbl9x10(cucvlAdvisorBishopThreatless, x, redY);
+        case Knight: {
+            const int mg = eyeTbl9x10(cucvlKnightMidgame, x, redY);
+            const int eg = eyeTbl9x10(cucvlKnightEndgame, x, redY);
+            return lerpEye(mg, eg, neutralMidgame);
+        }
+        case Rook: {
+            const int mg = eyeTbl9x10(cucvlRookMidgame, x, redY);
+            const int eg = eyeTbl9x10(cucvlRookEndgame, x, redY);
+            return lerpEye(mg, eg, neutralMidgame);
+        }
+        case Cannon: {
+            const int mg = eyeTbl9x10(cucvlCannonMidgame, x, redY);
+            const int eg = eyeTbl9x10(cucvlCannonEndgame, x, redY);
+            return lerpEye(mg, eg, neutralMidgame);
+        }
+        default:
+            return 0;
+    }
+}
+int startPstValue(stoneType t, colorType c, int x) {
+    switch (t) {
+        case Rook:
+            return pstValueRaw(t, c, x <= 4 ? 0 : 8, homeRank(c));
+        case Knight:
+            return pstValueRaw(t, c, x <= 4 ? 1 : 7, homeRank(c));
+        case Cannon:
+            return pstValueRaw(t, c, x <= 4 ? 1 : 7, initialCannonRank(c));
+        case Pawn:
+            return pstValueRaw(t, c, x, initialPawnRank(c));
+        default:
+            return pstValueRaw(t, c, x, homeRank(c));
+    }
+}
+
+int developmentPstDelta(stoneType t, colorType c, int x, int y) {
+    return pstValueRaw(t, c, x, y) - startPstValue(t, c, x);
+}
 
 AIPlayer::AIPlayer()
-    : tt_(),
-      searchStart_(std::chrono::steady_clock::now()),
+    : tt_(TT_SIZE * HASH_LAYERS),
+      searchStart_(),
       timeUp_(false),
       nodesSearched_(0),
-      searchAge_(0),
       allocatedTimeMs_(HARD_TIME_BASE_MS),
       softTimeMs_(SOFT_TIME_BASE_MS),
       hardTimeMs_(HARD_TIME_BASE_MS),
@@ -679,68 +744,34 @@ AIPlayer::AIPlayer()
       completedDepth_(0),
       bestMoveChanges_(0) {
     std::memset(history_, 0, sizeof(history_));
+
+    for (int side = 0; side < 2; ++side) {
+        for (int i = 0; i < BOARDWIDTH * BOARDHEIGHT; ++i) {
+            for (int j = 0; j < BOARDWIDTH * BOARDHEIGHT; ++j) {
+                counterMoves_[side][i][j] = Move();
+            }
+        }
+    }
+
     for (int ply = 0; ply < MAX_DEPTH; ++ply) {
         prevMove_[ply] = Move();
         for (int k = 0; k < MAX_KILLERS; ++k) {
             killers_[ply][k] = Move();
         }
     }
-    for (int color = 0; color < 2; ++color) {
-        for (int from = 0; from < BOARDWIDTH * BOARDHEIGHT; ++from) {
-            for (int to = 0; to < BOARDWIDTH * BOARDHEIGHT; ++to) {
-                counterMoves_[color][from][to] = Move();
-            }
-        }
-    }
 }
-
 // =====================================================================
 // 子力价值：开局 / 残局 / 排序基础值
 // =====================================================================
-int AIPlayer::pieceValueMg(stoneType t) {
-    switch (t) {
-        case Rook:      return 850;
-        case Cannon:    return 440;
-        case Knight:    return 370;
-        case Pawn:      return 100;
-        case Bishop:    return 200;
-        case Assistant: return 200;
-        case King:      return 0;
-        default:        return 0;
-    }
-}
-
-int AIPlayer::pieceValueEg(stoneType t) {
-    switch (t) {
-        case Rook:      return 850;
-        case Cannon:    return 330;
-        case Knight:    return 460;
-        case Pawn:      return 150;
-        case Bishop:    return 180;
-        case Assistant: return 180;
-        case King:      return 0;
-        default:        return 0;
-    }
-}
-
-int AIPlayer::pieceBaseValue(stoneType t) {
-    switch (t) {
-        case Rook:      return 850;
-        case Cannon:    return 400;
-        case Knight:    return 400;
-        case Pawn:      return 100;
-        case Bishop:    return 200;
-        case Assistant: return 200;
-        case King:      return 10000;
-        default:        return 0;
-    }
-}
 
 // =====================================================================
 // phase：0=残局，256=开局
 // =====================================================================
 int AIPlayer::endgamePhase(const ChessBoard& board) {
-    int phase = 0;
+    int rookCount = 0;
+    int knightCount = 0;
+    int cannonCount = 0;
+
     for (int x = 0; x < BOARDWIDTH; ++x) {
         for (int y = 0; y < BOARDHEIGHT; ++y) {
             const Grid g = board.getGridAt(x, y);
@@ -748,1454 +779,729 @@ int AIPlayer::endgamePhase(const ChessBoard& board) {
                 continue;
             }
             switch (g.type) {
-                case Rook:   phase += 44; break;
-                case Cannon: phase += 20; break;
-                case Knight: phase += 20; break;
-                case Pawn:   phase += 6;  break;
-                default:     phase += 4;  break;
+                case Rook:   ++rookCount; break;
+                case Knight: ++knightCount; break;
+                case Cannon: ++cannonCount; break;
+                default: break;
             }
         }
     }
-    return std::min(phase, 256);
-}
 
-// =====================================================================
-// PST 位置分
-// =====================================================================
-int AIPlayer::positionValue(stoneType t, colorType c, int x, int y) {
-    const int ry = (c == RED) ? y : (9 - y);
-    switch (t) {
-        case Pawn:      return PST_PAWN[x][ry];
-        case Knight:    return PST_KNIGHT[x][ry];
-        case Rook:      return PST_ROOK[x][ry];
-        case Cannon:    return PST_CANNON[x][ry];
-        case Bishop:    return PST_BISHOP[x][ry];
-        case Assistant: return PST_GUARD[x][ry];
-        case King:      return PST_KING[x][ry];
-        default:        return 0;
-    }
-}
+    const int majorCount = rookCount + knightCount + cannonCount;
+    const int knightCannonCount = knightCount + cannonCount;
 
-// =====================================================================
-// 辅助：统计对方深入我方半场的大子数（车/马/炮）
-// =====================================================================
-int AIPlayer::countEnemyDeepMajors(const ChessBoard& board, colorType side) const {
-    const colorType opp = ChessBoard::oppColor(side);
-    int count = 0;
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != opp) continue;
-            if (g.type != Rook && g.type != Knight && g.type != Cannon) continue;
-            // 对方子已过河进入我方半场
-            if (crossedRiver(opp, y)) {
-                ++count;
-            }
-        }
+    // 只按车马炮算阶段，车权重大，马炮次之
+    // 四车 + 四马 + 四炮 的满配置：
+    // 4*6 + 4*3 + 4*3 = 48
+    const int phaseWeight = rookCount * 6 + knightCount * 3 + cannonCount * 3;
+    int phase = (phaseWeight * 256 + 24) / 48;
+
+    // 你定义的“明确残局”：
+    // 1) 双方车马炮总数 <= 5
+    // 2) 或双方都没有车，且马炮总数 <= 6
+    //
+    // 不直接硬 return 48，而是把 phase 上限压低，让它平滑进入残局
+    if (majorCount <= 5 || (rookCount == 0 && knightCannonCount <= 6)) {
+        phase = std::min(phase, 56);
+    } else if (majorCount <= 7) {
+        // 接近残局，但还没到你定义的硬残局
+        phase = std::min(phase, 112);
     }
-    return count;
+
+    return std::max(0, std::min(phase, 256));
 }
 
 // =====================================================================
 // 评估 1：子力
 // =====================================================================
-int AIPlayer::evalMaterial(const ChessBoard& board, colorType side, int phase) const {
-    int mgScore = 0;
-    int egScore = 0;
+
+int AIPlayer::advisorShapeScore(const ChessBoard& board, colorType side) const {
+    const EyePstState st = buildEyePstState(board);
     const colorType opp = ChessBoard::oppColor(side);
+    const int homeY = homeRank(side);
+    const int dir = forwardDir(side);
+
+    int kingX = -1, kingY = -1;
+    if (!board.findKing(side, kingX, kingY)) {
+        return -200;
+    }
+
+    int ownAdvisorCount = 0;
+    int enemyRookCount = 0;
     for (int x = 0; x < BOARDWIDTH; ++x) {
         for (int y = 0; y < BOARDHEIGHT; ++y) {
             const Grid g = board.getGridAt(x, y);
-            if (g.color == EMPTY || g.type == King) {
-                continue;
-            }
-            if (g.color == side) {
-                mgScore += pieceValueMg(g.type);
-                egScore += pieceValueEg(g.type);
-            } else if (g.color == opp) {
-                mgScore -= pieceValueMg(g.type);
-                egScore -= pieceValueEg(g.type);
+            if (g.color == side && g.type == Assistant) {
+                ++ownAdvisorCount;
+            } else if (g.color == opp && g.type == Rook) {
+                ++enemyRookCount;
             }
         }
     }
-    return (mgScore * phase + egScore * (256 - phase)) / 256;
+
+    const int enemyAttack = (side == RED ? st.blackAttack : st.redAttack);
+
+    auto threatRankIndex = [&](int y) -> int {
+        // 对红方罚分时，Eye 用 RANK_FLIP(y)；对黑方罚分时，Eye 直接用 y
+        return (side == RED ? (y + 3) : (12 - y));
+    };
+
+    auto threatFileIndex = [&](int x) -> int {
+        return x + 3;
+    };
+
+    auto hollowThreatValue = [&](int y) -> int {
+        const int idx = threatRankIndex(y);
+        return cvlHollowThreat[idx] * (st.midgameValue + EYE_TOTAL_MIDGAME_VALUE)
+             / (EYE_TOTAL_MIDGAME_VALUE * 2);
+    };
+
+    auto centralThreatValue = [&](int y) -> int {
+        return cvlCentralThreat[threatRankIndex(y)];
+    };
+
+    auto bottomThreatValue = [&](int x) -> int {
+        return cvlBottomThreat[threatFileIndex(x)] * enemyAttack / EYE_TOTAL_ATTACK_VALUE;
+    };
+
+    const int advisorLeakage = 80 * enemyAttack / EYE_TOTAL_ATTACK_VALUE;
+
+    auto hasOwnAdvisor = [&](int x, int y) -> bool {
+        if (!ChessBoard::inBoard(x, y)) return false;
+        const Grid g = board.getGridAt(x, y);
+        return g.color == side && g.type == Assistant;
+    };
+
+    auto hasOwnKnight = [&](int x, int y) -> bool {
+        if (!ChessBoard::inBoard(x, y)) return false;
+        const Grid g = board.getGridAt(x, y);
+        return g.color == side && g.type == Knight;
+    };
+
+    auto enemyControlsSquare = [&](int x, int y) -> bool {
+        return protectedSquareForExchange(board, opp, x, y);
+    };
+
+    auto ownBottomRookGuardsCenter = [&]() -> bool {
+        for (int x = 0; x < BOARDWIDTH; ++x) {
+            const Grid g = board.getGridAt(x, homeY);
+            if (g.color == side && g.type == Rook) {
+                if (countPiecesBetween(board, x, homeY, 4, homeY) == 0) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    const int SHAPE_NONE   = 0;
+    const int SHAPE_CENTER = 1;
+    const int SHAPE_LEFT   = 2;
+    const int SHAPE_RIGHT  = 3;
+
+    int penalty = 0;
+
+    if (ownAdvisorCount == 2) {
+        if (kingX == 4 && kingY == homeY) {
+            int shape = SHAPE_NONE;
+
+            const bool leftBottom  = hasOwnAdvisor(3, homeY);
+            const bool rightBottom = hasOwnAdvisor(5, homeY);
+            const bool centerGuard = hasOwnAdvisor(4, homeY + dir);
+
+            if (leftBottom) {
+                shape = rightBottom ? SHAPE_CENTER : (centerGuard ? SHAPE_LEFT : SHAPE_NONE);
+            } else if (rightBottom) {
+                shape = centerGuard ? SHAPE_RIGHT : SHAPE_NONE;
+            } else if (centerGuard) {
+                shape = SHAPE_NONE;
+            }
+
+            switch (shape) {
+                case SHAPE_NONE:
+                    break;
+
+                case SHAPE_CENTER:
+                    for (int x = 0; x < BOARDWIDTH; ++x) {
+                        for (int y = 0; y < BOARDHEIGHT; ++y) {
+                            const Grid g = board.getGridAt(x, y);
+                            if (g.color != opp || g.type != Cannon) {
+                                continue;
+                            }
+
+                            if (x == 4) {
+                                const int cnt = countPiecesBetween(board, x, y, 4, homeY);
+                                if (cnt == 0) {
+                                    // 空头炮
+                                    penalty += hollowThreatValue(y);
+                                } else if (cnt == 1 && hasOwnKnight(4, homeY + dir)) {
+                                    // 炮镇窝心马
+                                    penalty += centralThreatValue(y);
+                                }
+                            }
+                        }
+                    }
+                    break;
+
+                case SHAPE_LEFT:
+                case SHAPE_RIGHT: {
+                    const int openDoorX = (shape == SHAPE_LEFT ? 5 : 3);
+
+                    for (int x = 0; x < BOARDWIDTH; ++x) {
+                        for (int y = 0; y < BOARDHEIGHT; ++y) {
+                            const Grid g = board.getGridAt(x, y);
+                            if (g.color != opp || g.type != Cannon) {
+                                continue;
+                            }
+
+                            if (x == 4) {
+                                const int cnt = countPiecesBetween(board, x, y, 4, homeY);
+                                if (cnt == 1) {
+                                    // 一般中炮威胁
+                                    penalty += (centralThreatValue(y) >> 2);
+                                    if (enemyControlsSquare(openDoorX, homeY)) {
+                                        penalty += 20;
+                                    }
+                                    if (ownBottomRookGuardsCenter()) {
+                                        penalty += 80;
+                                    }
+                                }
+                            } else if (y == homeY) {
+                                // 沉底炮威胁
+                                if (countPiecesBetween(board, x, y, 4, homeY) == 0) {
+                                    penalty += bottomThreatValue(x);
+                                }
+                            }
+                        }
+                    }
+                    break;
+                }
+
+                default:
+                    break;
+            }
+        } else if (kingX == 4 && kingY == homeY + dir) {
+            // 花心帅
+            penalty += 20;
+        }
+    } else {
+        // 缺士怕双车
+        if (enemyRookCount >= 2) {
+            penalty += advisorLeakage;
+        }
+    }
+
+    return -penalty;
 }
 
-// =====================================================================
-// 评估 2：位置与贴将压迫
-// =====================================================================
-int AIPlayer::evalPosition(const ChessBoard& board, colorType side) const {
-    int score = 0;
+int AIPlayer::rookMobilityScore(const ChessBoard& board, colorType side) const {
+    int mobility = 0;
+
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side || g.type != Rook) {
+                continue;
+            }
+
+            // 左
+            for (int tx = x - 1; tx >= 0; --tx) {
+                if (board.getGridAt(tx, y).color != EMPTY) {
+                    break;
+                }
+                ++mobility;
+            }
+
+            // 右
+            for (int tx = x + 1; tx < BOARDWIDTH; ++tx) {
+                if (board.getGridAt(tx, y).color != EMPTY) {
+                    break;
+                }
+                ++mobility;
+            }
+
+            // 下
+            for (int ty = y - 1; ty >= 0; --ty) {
+                if (board.getGridAt(x, ty).color != EMPTY) {
+                    break;
+                }
+                ++mobility;
+            }
+
+            // 上
+            for (int ty = y + 1; ty < BOARDHEIGHT; ++ty) {
+                if (board.getGridAt(x, ty).color != EMPTY) {
+                    break;
+                }
+                ++mobility;
+            }
+        }
+    }
+
+    return mobility >> 1;
+}
+
+int AIPlayer::knightTrapScore(const ChessBoard& board, colorType side) const {
     const colorType opp = ChessBoard::oppColor(side);
-    int oppKingX = -1;
-    int oppKingY = -1;
+    int penalty = 0;
+
+    auto isEdgeSquare = [&](int x, int y) -> bool {
+        return x == 0 || x == 8 || y == 0 || y == 9;
+    };
+
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side || g.type != Knight) {
+                continue;
+            }
+
+            int movable = 0;
+
+            for (int d = 0; d < 8; ++d) {
+                const int tx = x + dx_knight[d];
+                const int ty = y + dy_knight[d];
+                if (!ChessBoard::inBoard(tx, ty)) {
+                    continue;
+                }
+
+                // Eye: 边线格不算“好落点”
+                if (isEdgeSquare(tx, ty)) {
+                    continue;
+                }
+
+                // 目标格必须为空
+                if (board.getGridAt(tx, ty).color != EMPTY) {
+                    continue;
+                }
+
+                // 马腿不能被堵
+                const int fx = x + dx_knight_foot[d];
+                const int fy = y + dy_knight_foot[d];
+                if (board.getGridAt(fx, fy).color != EMPTY) {
+                    continue;
+                }
+
+                // Eye: 对方控制格不算“好落点”
+                if (protectedSquareForExchange(board, opp, tx, ty)) {
+                    continue;
+                }
+
+                ++movable;
+                if (movable > 1) {
+                    break;
+                }
+            }
+
+            if (movable == 0) {
+                penalty += 10;
+            } else if (movable == 1) {
+                penalty += 5;
+            }
+        }
+    }
+
+    return -penalty;
+}
+int AIPlayer::stringHoldScore(const ChessBoard& board, colorType side) const {
+    const colorType opp = ChessBoard::oppColor(side);
+    int score = 0;
+
+    auto collectBetweenPieces = [&](int sx, int sy, int tx, int ty,
+                                    std::vector<std::pair<int, int>>& pieces) {
+        pieces.clear();
+
+        int dx = 0, dy = 0;
+        if (sx == tx) {
+            dy = (ty > sy ? 1 : -1);
+        } else if (sy == ty) {
+            dx = (tx > sx ? 1 : -1);
+        } else {
+            return;
+        }
+
+        int x = sx + dx;
+        int y = sy + dy;
+        while (x != tx || y != ty) {
+            if (board.getGridAt(x, y).color != EMPTY) {
+                pieces.push_back(std::make_pair(x, y));
+            }
+            x += dx;
+            y += dy;
+        }
+    };
+
+    auto addRookStringAgainstTarget = [&](int sx, int sy, int tx, int ty, bool targetIsRook) {
+        std::vector<std::pair<int, int>> mids;
+        collectBetweenPieces(sx, sy, tx, ty, mids);
+
+        // Eye: 车牵制要求 source 到 target 之间正好只有一个被牵制子
+        if (mids.size() != 1) {
+            return;
+        }
+
+        const int strX = mids[0].first;
+        const int strY = mids[0].second;
+        const Grid strG = board.getGridAt(strX, strY);
+        if (strG.color != opp) {
+            return;
+        }
+
+        if (valuableStringLevel(strG.type) <= 0) {
+            return;
+        }
+
+        // 被牵制子不能被目标子当根保护
+        if (protectedSquareForExchange(board, opp, strX, strY, tx, ty)) {
+            return;
+        }
+
+        // 如果目标是车，目标车自己也必须没根
+        if (targetIsRook && protectedSquareForExchange(board, opp, tx, ty)) {
+            return;
+        }
+
+        const int dist = (sx == tx) ? std::abs(ty - strY) : std::abs(tx - strX);
+        score += stringHoldValueByDistance(dist);
+    };
+
+    auto addCannonStringAgainstTarget = [&](int sx, int sy, int tx, int ty, bool targetIsRook) {
+        std::vector<std::pair<int, int>> mids;
+        collectBetweenPieces(sx, sy, tx, ty, mids);
+
+        // Eye: 炮牵制要求 source 到 target 之间有两层隔子
+        if (mids.size() != 2) {
+            return;
+        }
+
+        // 第一层是炮架，第二层是被牵制子
+        const int strX = mids[1].first;
+        const int strY = mids[1].second;
+        const Grid strG = board.getGridAt(strX, strY);
+        if (strG.color != opp) {
+            return;
+        }
+
+        // Eye: 对炮来说，只有牵马有价值
+        if (valuableStringLevel(strG.type) <= 1) {
+            return;
+        }
+
+        if (protectedSquareForExchange(board, opp, strX, strY, tx, ty)) {
+            return;
+        }
+
+        if (targetIsRook && protectedSquareForExchange(board, opp, tx, ty)) {
+            return;
+        }
+
+        const int dist = (sx == tx) ? std::abs(ty - strY) : std::abs(tx - strX);
+        score += stringHoldValueByDistance(dist);
+    };
+
+    int oppKingX = -1, oppKingY = -1;
     board.findKing(opp, oppKingX, oppKingY);
 
+    std::vector<std::pair<int, int>> oppRooks;
     for (int x = 0; x < BOARDWIDTH; ++x) {
         for (int y = 0; y < BOARDHEIGHT; ++y) {
             const Grid g = board.getGridAt(x, y);
-            if (g.color == EMPTY) {
-                continue;
-            }
-            const int pst = positionValue(g.type, g.color, x, y);
-            if (g.color == side) {
-                score += pst;
-                if (oppKingX >= 0) {
-                    const int dist = std::abs(x - oppKingX) + std::abs(y - oppKingY);
-                    if (g.type == Rook) {
-                        if (x == oppKingX) {
-                            score += 14;
-                        } else if (y == oppKingY) {
-                            score += 10;
-                        }
-                        if (dist <= 3) {
-                            score += (4 - dist) * 3;
-                        }
-                    } else if (g.type == Knight && dist <= 3) {
-                        score += (4 - dist) * 2;
-                    } else if (g.type == Cannon && (x == oppKingX || y == oppKingY)) {
-                        score += 8;
-                    } else if (g.type == Pawn && dist <= 2) {
-                        score += (3 - dist) * 3;
-                    }
-                }
-            } else {
-                score -= pst;
+            if (g.color == opp && g.type == Rook) {
+                oppRooks.push_back(std::make_pair(x, y));
             }
         }
     }
+
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side) {
+                continue;
+            }
+
+            // 1) 车牵制将/车
+            if (g.type == Rook) {
+                if (oppKingX >= 0 && (x == oppKingX || y == oppKingY)) {
+                    addRookStringAgainstTarget(x, y, oppKingX, oppKingY, false);
+                }
+
+                for (const auto& rk : oppRooks) {
+                    const int tx = rk.first;
+                    const int ty = rk.second;
+                    if (x == tx || y == ty) {
+                        addRookStringAgainstTarget(x, y, tx, ty, true);
+                    }
+                }
+            }
+
+            // 2) 炮牵制将/车
+            if (g.type == Cannon) {
+                if (oppKingX >= 0 && (x == oppKingX || y == oppKingY)) {
+                    addCannonStringAgainstTarget(x, y, oppKingX, oppKingY, false);
+                }
+
+                for (const auto& rk : oppRooks) {
+                    const int tx = rk.first;
+                    const int ty = rk.second;
+                    if (x == tx || y == ty) {
+                        addCannonStringAgainstTarget(x, y, tx, ty, true);
+                    }
+                }
+            }
+        }
+    }
+
     return score;
 }
+// =====================================================================
+// 评估 2：PST 位置 + 简单贴将距离
+// =====================================================================
+int AIPlayer::evalPosition(const ChessBoard& board, colorType side) const {
+    const EyePstState st = buildEyePstState(board);
+    int score = 0;
 
+    // Iterate over all 32 pieces via Eye dual tables
+    for (int pc = 16; pc < 48; ++pc) {
+        int sq = board.squareOf(pc);
+        if (sq == 0) continue;
+        int pt = PIECE_TYPE_EYE(pc);
+        stoneType t = eyePtToStone(pt);
+        colorType c = (pc < 32) ? RED : BLACK;
+        int x = sq2x(sq), y = sq2y(sq);
+        int v = dynamicPstValue(st, t, c, x, y);
+        if (c == side) score += v;
+        else           score -= v;
+    }
+
+    return score;
+}
 // =====================================================================
 // 帅门格点危险分
 // =====================================================================
-int AIPlayer::scoreSquareDanger(const ChessBoard& board, colorType side, int x, int y) const {
-    const colorType attacker = ChessBoard::oppColor(side);
-    int rookThreats = 0;
-    int cannonThreats = 0;
-
-    for (int d = 0; d < 4; ++d) {
-        int tx = x + dx_strai[d];
-        int ty = y + dy_strai[d];
-        bool seenScreen = false;
-        while (ChessBoard::inBoard(tx, ty)) {
-            const Grid g = board.getGridAt(tx, ty);
-            if (g.color == EMPTY) {
-                tx += dx_strai[d];
-                ty += dy_strai[d];
-                continue;
-            }
-
-            if (!seenScreen) {
-                if (g.color == attacker) {
-                    if (g.type == Rook) {
-                        ++rookThreats;
-                        break;
-                    }
-                    if (g.type == King && tx == x) {
-                        ++rookThreats;
-                        break;
-                    }
-                }
-                seenScreen = true;
-            } else {
-                if (g.color == attacker && g.type == Cannon) {
-                    ++cannonThreats;
-                }
-                break;
-            }
-
-            tx += dx_strai[d];
-            ty += dy_strai[d];
-        }
-    }
-
-    int knightThreats = 0;
-    for (int d = 0; d < 8; ++d) {
-        const int knightX = x - dx_knight[d];
-        const int knightY = y - dy_knight[d];
-        if (!ChessBoard::inBoard(knightX, knightY)) {
-            continue;
-        }
-        const Grid knight = board.getGridAt(knightX, knightY);
-        if (knight.color != attacker || knight.type != Knight) {
-            continue;
-        }
-        const int footX = knightX + dx_knight_foot[d];
-        const int footY = knightY + dy_knight_foot[d];
-        if (board.getGridAt(footX, footY).color == EMPTY) {
-            ++knightThreats;
-        }
-    }
-
-    int pawnThreats = 0;
-    const int pawnY = y - forwardDir(attacker);
-    if (ChessBoard::inBoard(x, pawnY)) {
-        const Grid g = board.getGridAt(x, pawnY);
-        if (g.color == attacker && g.type == Pawn) {
-            ++pawnThreats;
-        }
-    }
-    if (crossedRiver(attacker, y)) {
-        if (x > 0) {
-            const Grid g = board.getGridAt(x - 1, y);
-            if (g.color == attacker && g.type == Pawn) {
-                ++pawnThreats;
-            }
-        }
-        if (x < BOARDWIDTH - 1) {
-            const Grid g = board.getGridAt(x + 1, y);
-            if (g.color == attacker && g.type == Pawn) {
-                ++pawnThreats;
-            }
-        }
-    }
-
-    int danger = rookThreats * 28 + cannonThreats * 24 + knightThreats * 18 + pawnThreats * 10;
-    if (rookThreats + cannonThreats >= 2) {
-        danger += 16;
-    }
-    if (knightThreats >= 2) {
-        danger += 10;
-    }
-    return danger;
-}
 
 // =====================================================================
 // 帅门安全模式识别
 // =====================================================================
-AIPlayer::KingDangerInfo AIPlayer::analyzeKingDanger(const ChessBoard& board, colorType side) const {
-    KingDangerInfo info;
-    if (!board.findKing(side, info.kingX, info.kingY)) {
-        info.totalDanger = 240;
-        return info;
-    }
-
-    const colorType opp = ChessBoard::oppColor(side);
-    const int homeY = homeRank(side);
-    const int dir = forwardDir(side);
-    std::vector<std::pair<int, int>> enemyRooks;
-
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color == side) {
-                if (g.type == Assistant) {
-                    ++info.guardCount;
-                } else if (g.type == Bishop) {
-                    ++info.bishopCount;
-                }
-                if (inPalace(side, x, y) && g.type != King) {
-                    ++info.palaceDefenders;
-                }
-            } else if (g.color == opp && g.type == Rook) {
-                enemyRooks.push_back(std::make_pair(x, y));
-            }
-        }
-    }
-
-    for (int step = 1; step <= 3; ++step) {
-        const int y = homeY + dir * step;
-        if (!ChessBoard::inBoard(4, y)) {
-            break;
-        }
-        const Grid g = board.getGridAt(4, y);
-        if (g.color != side) {
-            ++info.centerFileOpen;
-        }
-        if (g.color != EMPTY) {
-            break;
-        }
-    }
-
-    const int frontY = info.kingY + dir;
-    if (ChessBoard::inBoard(info.kingX, frontY) && board.getGridAt(info.kingX, frontY).color == EMPTY) {
-        ++info.frontOpen;
-    }
-    const int front2Y = info.kingY + dir * 2;
-    if (ChessBoard::inBoard(info.kingX, front2Y) && board.getGridAt(info.kingX, front2Y).color == EMPTY) {
-        ++info.frontOpen;
-    }
-    if (info.kingX > 3 && board.getGridAt(info.kingX - 1, info.kingY).color == EMPTY) {
-        ++info.frontOpen;
-    }
-    if (info.kingX < 5 && board.getGridAt(info.kingX + 1, info.kingY).color == EMPTY) {
-        ++info.frontOpen;
-    }
-
-    info.currentSquareDanger = scoreSquareDanger(board, side, info.kingX, info.kingY);
-    int bestPalaceDanger = info.currentSquareDanger;
-    for (int px = 3; px <= 5; ++px) {
-        for (int py = palaceMinRank(side); py <= palaceMaxRank(side); ++py) {
-            const Grid g = board.getGridAt(px, py);
-            if (g.color == side && !(px == info.kingX && py == info.kingY)) {
-                continue;
-            }
-            const int squareDanger = scoreSquareDanger(board, side, px, py);
-            if (squareDanger <= 14) {
-                ++info.safePalaceSquares;
-            }
-            if (squareDanger >= 24) {
-                ++info.attackedPalaceSquares;
-            }
-            if (!(px == info.kingX && py == info.kingY)) {
-                bestPalaceDanger = std::min(bestPalaceDanger, squareDanger);
-            }
-        }
-    }
-    info.escapeImprovement = std::max(0, info.currentSquareDanger - bestPalaceDanger);
-
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != opp) {
-                continue;
-            }
-
-            switch (g.type) {
-                case Cannon: {
-                    if ((x == info.kingX || y == info.kingY) &&
-                        countPiecesBetween(board, x, y, info.kingX, info.kingY) == 1) {
-                        ++info.directCannonPressure;
-                    }
-
-                    if ((y == homeY || y == homeY + dir) && std::abs(x - 4) <= 1) {
-                        const int keyXs[4] = {3, 4, 5, 4};
-                        const int keyYs[4] = {homeY, homeY, homeY, homeY + dir};
-                        int press = 0;
-                        for (int i = 0; i < 4; ++i) {
-                            if (!ChessBoard::inBoard(keyXs[i], keyYs[i])) {
-                                continue;
-                            }
-                            if ((x == keyXs[i] || y == keyYs[i]) &&
-                                countPiecesBetween(board, x, y, keyXs[i], keyYs[i]) == 1) {
-                                ++press;
-                            }
-                        }
-                        if (press > 0) {
-                            const int add = std::min(2, press);
-                            info.bottomCannonThreat += add;
-                            if (x < 4) {
-                                info.bottomCannonSide -= add;
-                            } else if (x > 4) {
-                                info.bottomCannonSide += add;
-                            }
-                        }
-                    }
-                    break;
-                }
-                case Rook: {
-                    if ((x == info.kingX || y == info.kingY) &&
-                        countPiecesBetween(board, x, y, info.kingX, info.kingY) == 0) {
-                        ++info.directRookPressure;
-                    }
-                    if (x >= 3 && x <= 5) {
-                        const int laneY = ChessBoard::inBoard(x, homeY + dir) ? (homeY + dir) : homeY;
-                        if (countPiecesBetween(board, x, y, x, laneY) == 0) {
-                            ++info.doubleCheckLanes;
-                        }
-                        if (countPiecesBetween(board, x, y, x, homeY) <= 1) {
-                            ++info.sideFilePressure;
-                        }
-                    }
-                    break;
-                }
-                case Knight: {
-                    if (knightAttacksSquare(board, x, y, info.kingX, info.kingY)) {
-                        info.horseThreat += 2;
-                    } else {
-                        int palaceHits = 0;
-                        for (int px = 3; px <= 5; ++px) {
-                            for (int py = palaceMinRank(side); py <= palaceMaxRank(side); ++py) {
-                                if ((px == info.kingX && py == info.kingY) || !inPalace(side, px, py)) {
-                                    continue;
-                                }
-                                if (knightAttacksSquare(board, x, y, px, py)) {
-                                    ++palaceHits;
-                                }
-                            }
-                        }
-                        if (palaceHits > 0) {
-                            info.horseThreat += 1 + (palaceHits > 1 ? 1 : 0);
-                        }
-                    }
-                    if (isClassicWocaoSquare(side, x, y)) {
-                        ++info.wocaoThreat;
-                    }
-                    if (isClassicShijiaoSquare(side, x, y)) {
-                        ++info.shijiaoThreat;
-                    }
-                    break;
-                }
-                case Pawn: {
-                    if (advanceOf(opp, y) >= 5 && std::abs(x - info.kingX) + std::abs(y - info.kingY) <= 2) {
-                        ++info.pawnStorm;
-                    }
-                    if (x >= 3 && x <= 5 && crossedRiver(opp, y)) {
-                        ++info.sideFilePressure;
-                    }
-                    break;
-                }
-                default:
-                    break;
-            }
-        }
-    }
-
-    if (info.bottomCannonThreat > 0) {
-        for (const auto& rookPos : enemyRooks) {
-            const int rookX = rookPos.first;
-            const int rookY = rookPos.second;
-            if (rookX < 3 || rookX > 5) {
-                continue;
-            }
-            const int frontLaneY = ChessBoard::inBoard(rookX, homeY + dir) ? (homeY + dir) : homeY;
-            if (countPiecesBetween(board, rookX, rookY, rookX, frontLaneY) <= 1) {
-                ++info.rookCannonThreat;
-            }
-            if (countPiecesBetween(board, rookX, rookY, rookX, homeY) <= 1) {
-                ++info.rookCannonThreat;
-            }
-            if (info.bottomCannonSide < 0 && rookX == 3) {
-                ++info.rookCannonThreat;
-            }
-            if (info.bottomCannonSide > 0 && rookX == 5) {
-                ++info.rookCannonThreat;
-            }
-            if (info.bottomCannonSide == 0 && rookX == 4) {
-                ++info.rookCannonThreat;
-            }
-        }
-    }
-
-    if (info.guardCount == 0 && info.wocaoThreat > 0) {
-        ++info.wocaoThreat;
-    }
-    if (info.guardCount < 2 && info.shijiaoThreat > 0) {
-        ++info.shijiaoThreat;
-    }
-    if (info.bishopCount == 0 && info.horseThreat > 0) {
-        ++info.horseThreat;
-    }
-
-    int danger = 0;
-    danger += (2 - info.guardCount) * 18;
-    danger += (2 - info.bishopCount) * 12;
-    danger += info.frontOpen * 8;
-    danger += info.centerFileOpen * 12;
-    danger += info.sideFilePressure * 6;
-    danger += info.currentSquareDanger * 2;
-    danger += info.directRookPressure * 24;
-    danger += info.directCannonPressure * 20;
-    danger += info.bottomCannonThreat * 24;
-    danger += info.rookCannonThreat * 28;
-    danger += info.horseThreat * 12;
-    danger += info.wocaoThreat * 22;
-    danger += info.shijiaoThreat * 18;
-    danger += info.doubleCheckLanes * 12;
-    danger += info.pawnStorm * 8;
-    danger += std::max(0, 3 - info.safePalaceSquares) * 10;
-    danger += info.attackedPalaceSquares * 4;
-    danger += (info.palaceDefenders <= 1) ? 10 : 0;
-    danger -= info.escapeImprovement;
-    info.totalDanger = clampInt(danger, 0, 240);
-    return info;
-}
 
 // =====================================================================
 // 评估 3：帅门安全与条件化帅位
 // =====================================================================
-int AIPlayer::evalKingSafety(const ChessBoard& board, colorType side) const {
-    const KingDangerInfo info = analyzeKingDanger(board, side);
-    if (info.kingX < 0) {
-        return -MATE_SCORE;
-    }
-
-    int score = 0;
-    score += info.guardCount * 26;
-    score += info.bishopCount * 18;
-    score += info.palaceDefenders * 7;
-    score += info.safePalaceSquares * 6;
-
-    score -= info.frontOpen * 9;
-    score -= info.centerFileOpen * 12;
-    score -= info.sideFilePressure * 6;
-    score -= info.currentSquareDanger * 3;
-    score -= info.bottomCannonThreat * 34;
-    score -= info.rookCannonThreat * 46;
-    score -= info.directRookPressure * 18;
-    score -= info.directCannonPressure * 16;
-    score -= info.horseThreat * 16;
-    score -= info.wocaoThreat * 40;
-    score -= info.shijiaoThreat * 30;
-    score -= info.doubleCheckLanes * 18;
-    score -= info.pawnStorm * 10;
-    score -= std::max(0, 2 - info.guardCount) * 12;
-    score -= std::max(0, 2 - info.bishopCount) * 8;
-
-    const int homeY = homeRank(side);
-    const int displacement = std::abs(info.kingX - 4) * 18 + std::abs(info.kingY - homeY) * 14;
-    const int placementWeight = std::max(26, 110 - info.totalDanger);
-
-    score += 70;
-    score -= displacement * placementWeight / 100;
-    if (info.kingX == 4 && info.kingY == homeY && info.totalDanger < 70) {
-        score += 24;
-    }
-
-    if (info.totalDanger >= 80) {
-        score += std::min(info.escapeImprovement, 32);
-        if (info.bottomCannonSide < 0 && info.kingX == 5) {
-            score += 18;
-        }
-        if (info.bottomCannonSide > 0 && info.kingX == 3) {
-            score += 18;
-        }
-        if (info.kingY != homeY && info.currentSquareDanger <= 20) {
-            score += 8;
-        }
-    } else {
-        if (info.kingX != 4) {
-            score -= 6;
-        }
-        if (info.kingY != homeY) {
-            score -= 10;
-        }
-    }
-
-    return score;
-}
 
 // =====================================================================
-// 评估 4：机动性
+// 评估 4：车炮马机动性（简单可控）
 // =====================================================================
-int AIPlayer::evalMobility(const ChessBoard& board, colorType side, int phase) const {
-    int score = 0;
-    const colorType opp = ChessBoard::oppColor(side);
-
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != side) {
-                continue;
-            }
-
-            if (g.type == Rook) {
-                int mobility = 0;
-                for (int d = 0; d < 4; ++d) {
-                    int tx = x + dx_strai[d];
-                    int ty = y + dy_strai[d];
-                    while (ChessBoard::inBoard(tx, ty)) {
-                        const Grid tg = board.getGridAt(tx, ty);
-                        if (tg.color == EMPTY) {
-                            ++mobility;
-                        } else {
-                            if (tg.color == opp) {
-                                ++mobility;
-                            }
-                            break;
-                        }
-                        tx += dx_strai[d];
-                        ty += dy_strai[d];
-                    }
-                }
-                score += mobility * 2;
-                bool ownPawnOnFile = false;
-                for (int fy = 0; fy < BOARDHEIGHT; ++fy) {
-                    if (fy == y) {
-                        continue;
-                    }
-                    const Grid filePiece = board.getGridAt(x, fy);
-                    if (filePiece.color == side && filePiece.type == Pawn) {
-                        ownPawnOnFile = true;
-                        break;
-                    }
-                }
-                if (!ownPawnOnFile) {
-                    score += 8;
-                }
-                const int adv = advanceOf(side, y);
-                if (adv >= 5) {
-                    score += (adv - 4) * 4;
-                }
-            }
-
-            if (g.type == Knight) {
-                int jumps = 0;
-                int strongJumps = 0;
-                for (int d = 0; d < 8; ++d) {
-                    const int tx = x + dx_knight[d];
-                    const int ty = y + dy_knight[d];
-                    if (!ChessBoard::inBoard(tx, ty)) {
-                        continue;
-                    }
-                    const int footX = x + dx_knight_foot[d];
-                    const int footY = y + dy_knight_foot[d];
-                    if (board.getGridAt(footX, footY).color != EMPTY) {
-                        continue;
-                    }
-                    if (board.getGridAt(tx, ty).color == side) {
-                        continue;
-                    }
-                    ++jumps;
-                    if (advanceOf(side, ty) >= 5) {
-                        ++strongJumps;
-                    }
-                }
-                const int knightMul = (phase < 128) ? 4 : 3;
-                score += jumps * knightMul + strongJumps * 2;
-            }
-
-            if (g.type == Cannon) {
-                int mobility = 0;
-                int threats = 0;
-                for (int d = 0; d < 4; ++d) {
-                    int tx = x + dx_strai[d];
-                    int ty = y + dy_strai[d];
-                    bool foundMount = false;
-                    while (ChessBoard::inBoard(tx, ty)) {
-                        const Grid tg = board.getGridAt(tx, ty);
-                        if (!foundMount) {
-                            if (tg.color == EMPTY) {
-                                ++mobility;
-                            } else {
-                                foundMount = true;
-                            }
-                        } else if (tg.color != EMPTY) {
-                            if (tg.color == opp) {
-                                ++threats;
-                            }
-                            break;
-                        }
-                        tx += dx_strai[d];
-                        ty += dy_strai[d];
-                    }
-                }
-                score += mobility + threats * 6;
-            }
-        }
-    }
-    return score;
-}
 
 // =====================================================================
-// 评估 5：兵形
+// 总评估 — Eye Evaluate(vlAlpha, vlBeta) 带4级懒惰裁剪
 // =====================================================================
-int AIPlayer::evalPawnStructure(const ChessBoard& board, colorType side) const {
-    int score = 0;
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != side || g.type != Pawn) {
-                continue;
-            }
-            if (advanceOf(side, y) >= 5) {
-                if (x > 0 && board.getGridAt(x - 1, y) == Grid(Pawn, side)) {
-                    score += 8;
-                }
-                if (x < BOARDWIDTH - 1 && board.getGridAt(x + 1, y) == Grid(Pawn, side)) {
-                    score += 8;
-                }
-            }
-        }
-    }
-    return score;
-}
-
-// =====================================================================
-// 评估 6：兵的推进
-// =====================================================================
-int AIPlayer::evalPawnAdvancement(const ChessBoard& board, colorType side, int phase) const {
-    int score = 0;
-    const colorType opp = ChessBoard::oppColor(side);
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.type != Pawn) {
-                continue;
-            }
-            if (g.color == side) {
-                const int adv = advanceOf(side, y);
-                if (adv >= 5) {
-                    score += 100;
-                    score += (adv - 5) * ((phase < 128) ? 15 : 10);
-                }
-            } else if (g.color == opp) {
-                const int adv = advanceOf(opp, y);
-                if (adv >= 5) {
-                    score -= 100;
-                    score -= (adv - 5) * ((phase < 128) ? 15 : 10);
-                }
-            }
-        }
-    }
-    return score;
-}
-
-// =====================================================================
-// 评估 7：攻击压力（含"帮对方活子"惩罚）
-// =====================================================================
-int AIPlayer::evalAttackPressure(const ChessBoard& board, colorType side) const {
-    int score = 0;
-    const colorType opp = ChessBoard::oppColor(side);
-    ChessBoard& mutableBoard = const_cast<ChessBoard&>(board);
-    const int phase = endgamePhase(board);
-    const int weakFlank = TacticalRules::weakerFlank(board, opp);
-
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != opp) {
-                continue;
-            }
-            if (!mutableBoard.attacked(side, x, y)) {
-                continue;
-            }
-
-            // 基础攻击奖励
-            if (g.type == Rook) {
-                score += 12;
-            } else if (g.type == Cannon || g.type == Knight) {
-                score += 8;
-            } else if (g.type == Assistant || g.type == Bishop) {
-                score += 3;
-            }
-
-            TacticalRules::RootInfo rootInfo;
-            if (g.type != King && g.type != None) {
-                rootInfo = TacticalRules::analyzeRoot(board, x, y);
-                if (rootInfo.severelyHanging) {
-                    score += 20 + pieceBaseValue(g.type) / 35;
-                } else if (rootInfo.inDanger) {
-                    score += 10 + pieceBaseValue(g.type) / 55;
-                } else if (rootInfo.virtualRoot) {
-                    score += 5;
-                } else if (rootInfo.hasRoot) {
-                    score -= 4;
-                }
-                if (weakFlank >= 0 && TacticalRules::onFlank(x, weakFlank)) {
-                    score += rootInfo.hasRoot ? 3 : 9;
-                }
-            }
-
-            // "帮对方活子"惩罚：如果被攻击的子在差位置或初始受限位置，
-            // 被赶走后可能去到更好的位置，此时攻击收益打折
-            if (phase > 150) {
-                // 通用：对方子当前位置PST很低 => 被赶走后大概率变好
-                int piecePst = positionValue(g.type, g.color, x, y);
-                if (piecePst <= 4 && (g.type == Rook || g.type == Knight || g.type == Cannon)) {
-                    score -= 5;
-                }
-                // 对方马还在初始位置被攻击 => 赶走它反而帮它出子
-                if (g.type == Knight && !isDevelopedKnight(opp, x, y)) {
-                    score -= 8;
-                }
-                // 对方车在角上被骚扰 => 可能帮它出来
-                if (g.type == Rook && !isDevelopedRook(opp, x, y)) {
-                    score -= 10;
-                }
-                // 对方炮在初始位置被骚扰 => 可能帮它走到更好位置
-                if (g.type == Cannon && !isDevelopedCannon(opp, x, y)) {
-                    score -= 5;
-                }
-                if ((g.type == Rook || g.type == Cannon) && rootInfo.hasRoot && !rootInfo.virtualRoot) {
-                    score -= 4; // 有实根的车炮不应被盲目高估为攻击成果
-                }
-            }
-        }
-    }
-    return score;
-}
-
-// =====================================================================
-// 评估 8：开局出子（含六大子均衡发展）
-// =====================================================================
-int AIPlayer::evalDevelopment(const ChessBoard& board, colorType side, int phase) const {
-    if (phase <= 100) {
-        return 0;
-    }
-
-    int score = 0;
-    int developedRooks = 0;
-    int developedKnights = 0;
-    int developedCannons = 0;
-    int centeredCannons = 0;
-    int normalRooks = 0;
-    int normalKnights = 0;
-    int activatedKnights = 0;
-    int usefulCannons = 0;
-    int totalRooks = 0;
-    int totalKnights = 0;
-    int totalCannons = 0;
-    bool leftKnightNormal = false;
-    bool rightKnightNormal = false;
-    bool leftKnightActivated = false;
-    bool rightKnightActivated = false;
-
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != side) {
-                continue;
-            }
-            if (g.type == Rook) {
-                ++totalRooks;
-                if (isDevelopedRook(side, x, y)) {
-                    const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
-                    ++developedRooks;
-                    score += 12;
-                    if (y == homeRank(side) && (x == 1 || x == 7)) {
-                        ++normalRooks;
-                        score += 18; // 车一平二式的正常出车
-                    }
-                    if (y == homeRank(side) && (x == 3 || x == 5)) {
-                        ++normalRooks;
-                        score += 26; // 从士位出车更具人类布局感
-                    }
-                    if (advanceOf(side, y) >= 2) {
-                        score += 18; // 进一步出车
-                    }
-                    const int fileQuality = rookFileQuality(board, side, x);
-                    if (fileQuality == 2) {
-                        score += 10;
-                    } else if (fileQuality == 1) {
-                        score += 6;
-                    }
-                    if (root.hasRoot) {
-                        score += 6;
-                    } else if (root.virtualRoot) {
-                        score -= 8;
-                    } else if (root.inDanger) {
-                        score -= 14;
-                    }
-                } else if (x == 0 || x == 8) {
-                    score -= 32; // 长时间闷在底线角上
-                } else {
-                    score -= 18;
-                }
-            } else if (g.type == Knight) {
-                ++totalKnights;
-                const int jumpCount = countKnightJumpOptions(board, side, x, y);
-                const int forwardJumps = countKnightForwardJumps(board, side, x, y);
-                const int blockedLegs = countKnightBlockedLegs(board, x, y);
-                if (isDevelopedKnight(side, x, y)) {
-                    const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
-                    ++developedKnights;
-                    score += 8;
-                    score += jumpCount * 3 + forwardJumps * 4;
-                    score -= blockedLegs * 5;
-
-                    if (isNormalKnightSquare(side, x, y)) {
-                        ++normalKnights;
-                        score += 28; // 明显鼓励正马
-                        if (x == 2) {
-                            leftKnightNormal = true;
-                        } else if (x == 6) {
-                            rightKnightNormal = true;
-                        }
-                    } else if (phase > 170 && advanceOf(side, y) <= 2) {
-                        score -= 16; // 早期边马、怪马降权
-                    }
-
-                    const int pawnFile = (x <= 4) ? 2 : 6;
-                    if (flankPawnActivatesKnight(board, side, x, y, pawnFile)) {
-                        ++activatedKnights;
-                        score += 16; // 三七兵真正活马时再奖励
-                        if (pawnFile == 2) {
-                            leftKnightActivated = true;
-                        } else {
-                            rightKnightActivated = true;
-                        }
-                    }
-                    if (root.hasRoot) {
-                        score += 5;
-                    } else if (root.virtualRoot) {
-                        score -= 7;
-                    } else if (root.inDanger) {
-                        score -= 12;
-                    }
-                } else {
-                    score -= 20;
-                    if (isInitialKnightSquare(side, x, y) && phase > 170) {
-                        score -= 6;
-                    }
-                }
-            } else if (g.type == Cannon) {
-                ++totalCannons;
-                const int adv = advanceOf(side, y);
-                const bool useful = isCannonMoveUseful(board, Move(x, y, x, y), side, phase);
-                const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
-                if (x == 4 && adv >= 2) {
-                    ++centeredCannons;
-                    ++developedCannons;
-                    ++usefulCannons;
-                    score += 22; // 中炮优先
-                } else if (isDevelopedCannon(side, x, y)) {
-                    ++developedCannons;
-                    if (useful) {
-                        ++usefulCannons;
-                        score += 10;
-                    } else {
-                        if (phase > 170) {
-                            score -= 14; // 炮先动但没形成中炮/炮架/沉底压制
-                        }
-                        if (adv >= 4) {
-                            score -= 12;
-                        }
-                    }
-                    if (phase > 170 && x != 4 && adv <= 2) {
-                        score -= 10;
-                    }
-                    if (phase > 180 && adv >= 4 && x != 4 && !useful) {
-                        score -= 18;
-                    }
-                } else {
-                    score -= 6;
-                }
-                if (root.hasRoot && useful) {
-                    score += 6;
-                } else if (root.virtualRoot) {
-                    score -= 8;
-                } else if (root.inDanger && (!useful || adv >= 4)) {
-                    score -= 14;
-                }
-            }
-        }
-    }
-
-    if (flankPawnAdvanced(board, side, 2) && !leftKnightActivated && !leftKnightNormal && phase > 170) {
-        score -= 6; // 三兵已动但没有真正活左马，不鼓励机械冲兵
-    }
-    if (flankPawnAdvanced(board, side, 6) && !rightKnightActivated && !rightKnightNormal && phase > 170) {
-        score -= 6; // 七兵同理
-    }
-
-    if (developedRooks == 0) {
-        score -= 34;
-    } else if (developedRooks == 1 && totalRooks >= 2) {
-        score -= 12;
-    }
-    if (developedKnights == 0) {
-        score -= 20;
-    }
-    if (centeredCannons == 0 && phase > 180) {
-        score -= 14;
-    }
-    if (normalKnights == 0 && phase > 170) {
-        score -= 12;
-    } else if (normalKnights == 1) {
-        score += 8;
-    } else if (normalKnights >= 2) {
-        score += 18;
-    }
-    if (normalRooks >= 2) {
-        score += 16;
-    } else if (normalRooks == 1) {
-        score += 6;
-    }
-    if (activatedKnights == 1) {
-        score += 8;
-    } else if (activatedKnights >= 2) {
-        score += 16;
-    }
-    if (developedCannons > 0 && usefulCannons == 0 && phase > 180) {
-        score -= 16; // 炮都动了，但没有一个是中炮/有用炮
-    }
-
-    // ---- 六大子均衡发展奖惩 ----
-    const int totalDeveloped = developedRooks + developedKnights + developedCannons;
-    const int totalMajors = totalRooks + totalKnights + totalCannons;
-
-    if (phase > 160 && totalMajors >= 4) {
-        // 奖励整体展开
-        if (totalDeveloped >= 5) {
-            score += 26;
-        } else if (totalDeveloped >= 4) {
-            score += 16;
-        } else if (totalDeveloped >= 3) {
-            score += 6;
-        }
-
-        // 惩罚不均衡：某类大子完全没出，但其他已经出了
-        int typesStuck = 0;
-        if (totalRooks > 0 && developedRooks == 0) ++typesStuck;
-        if (totalKnights > 0 && developedKnights == 0) ++typesStuck;
-        if (totalCannons > 0 && developedCannons == 0) ++typesStuck;
-
-        if (typesStuck >= 2 && totalDeveloped >= 1) {
-            score -= 26; // 严重不均衡惩罚加重
-        } else if (typesStuck == 1 && totalDeveloped >= 2) {
-            score -= 12;
-        }
-
-        // 特别惩罚：车没出但炮已经在跑 => 发展失调
-        if (totalRooks > 0 && developedRooks == 0 && developedCannons > 0) {
-            score -= 18;
-        }
-        // 特别惩罚：只有炮活跃，马车都没出
-        if (totalRooks > 0 && developedRooks == 0
-            && totalKnights > 0 && developedKnights == 0
-            && developedCannons > 0) {
-            score -= 22;
-        }
-
-        // 双车出动额外奖励
-        if (developedRooks >= 2) {
-            score += 14;
-        }
-        // 双马出动额外奖励
-        if (developedKnights >= 2) {
-            score += 8;
-        }
-        if (centeredCannons >= 1 && developedCannons >= 2) {
-            score += 10; // 双炮形成合理分工，中炮更佳
-        }
-        // 三类子都至少出一个 → 协调奖励
-        if (developedRooks > 0 && developedKnights > 0 && developedCannons > 0) {
-            score += 12;
-        }
-        if (developedRooks >= 2 && normalKnights >= 2) {
-            score += 14; // 车马都按常规节奏展开
-        }
-        if (developedRooks >= 2 && normalKnights >= 2 && centeredCannons >= 1) {
-            score += 14; // 六大子整体协调时再给明显奖励
-        }
-    }
-
-    const int devWeight = std::min(phase - 100, 156);
-    return score * devWeight / 156;
-}
-
-// =====================================================================
-// 评估 9：棋子活跃度（含沉底抽将识别）
-// =====================================================================
-int AIPlayer::evalPieceActivity(const ChessBoard& board, colorType side, int phase) const {
-    int score = 0;
-    const colorType opp = ChessBoard::oppColor(side);
-    int oppKingX = -1;
-    int oppKingY = -1;
-    board.findKing(opp, oppKingX, oppKingY);
-
-    int rookCount = 0;
-    int rookX[2] = {-1, -1};
-    int rookY[2] = {-1, -1};
-    const int riverY = (side == RED) ? 4 : 5;
-    const int enemyBase = (side == RED) ? 9 : 0;
-
-    // 收集己方沉底车/炮的位置，以及对方高价值子位置
-    struct BottomPiece { int x; int y; stoneType type; };
-    BottomPiece bottomPieces[4];
-    int bottomCount = 0;
-
-    for (int x = 0; x < BOARDWIDTH; ++x) {
-        for (int y = 0; y < BOARDHEIGHT; ++y) {
-            const Grid g = board.getGridAt(x, y);
-            if (g.color != side) {
-                continue;
-            }
-
-            if (g.type == Rook) {
-                const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
-                if (rookCount < 2) {
-                    rookX[rookCount] = x;
-                    rookY[rookCount] = y;
-                    ++rookCount;
-                }
-                if (x == 4) {
-                    score += 10;
-                }
-                if (x == 3 || x == 5) {
-                    score += 16;
-                }
-                if (y == riverY || y == riverY + ((side == RED) ? 1 : -1)) {
-                    score += 12;
-                }
-                const int fileQuality = rookFileQuality(board, side, x);
-                if (fileQuality == 2) {
-                    score += 14; // 开放线上的车更有压制力
-                } else if (fileQuality == 1) {
-                    score += 8; // 半开放线也应鼓励
-                }
-                if (phase > 170 && isInitialRookSquare(side, x, y)) {
-                    score -= 14; // 车还闷在底线角上
-                }
-                score += attackTowardsWeakerFlankBonus(board, side, x, y, Rook);
-                if (root.hasRoot) {
-                    score += 8;
-                } else if (root.virtualRoot) {
-                    score -= 6;
-                } else if (root.inDanger) {
-                    score -= 14;
-                }
-                if (y == enemyBase) {
-                    score += 18;
-                    // 记录沉底车
-                    if (bottomCount < 4) {
-                        bottomPieces[bottomCount++] = {x, y, Rook};
-                    }
-                }
-                if (oppKingX >= 0) {
-                    const int dist = std::abs(x - oppKingX) + std::abs(y - oppKingY);
-                    if (dist <= 2) {
-                        score += 12;
-                    }
-                }
-            }
-
-            if (g.type == Knight) {
-                const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
-                const int adv = advanceOf(side, y);
-                const int jumpCount = countKnightJumpOptions(board, side, x, y);
-                const int forwardJumps = countKnightForwardJumps(board, side, x, y);
-                const int blockedLegs = countKnightBlockedLegs(board, x, y);
-                score += jumpCount * ((phase < 128) ? 4 : 3);
-                score += forwardJumps * 3;
-                score -= blockedLegs * 4;
-                if (isNormalKnightSquare(side, x, y)) {
-                    score += 14;
-                } else if (phase > 170 && isDevelopedKnight(side, x, y) && adv <= 2) {
-                    score -= 12; // 早期怪马、边马
-                }
-                const int pawnFile = (x <= 4) ? 2 : 6;
-                if (flankPawnActivatesKnight(board, side, x, y, pawnFile)) {
-                    score += 12;
-                }
-                score += attackTowardsWeakerFlankBonus(board, side, x, y, Knight);
-                if (root.hasRoot) {
-                    score += 5;
-                } else if (root.virtualRoot) {
-                    score -= 5;
-                } else if (root.inDanger && adv >= 3) {
-                    score -= 10;
-                }
-                if (adv >= 5) {
-                    int strongJumps = 0;
-                    for (int d = 0; d < 8; ++d) {
-                        const int tx = x + dx_knight[d];
-                        const int ty = y + dy_knight[d];
-                        if (!ChessBoard::inBoard(tx, ty)) {
-                            continue;
-                        }
-                        const int footX = x + dx_knight_foot[d];
-                        const int footY = y + dy_knight_foot[d];
-                        if (board.getGridAt(footX, footY).color != EMPTY) {
-                            continue;
-                        }
-                        if (advanceOf(side, ty) >= 5) {
-                            ++strongJumps;
-                        }
-                    }
-                    score += strongJumps * ((phase < 128) ? 5 : 3);
-                }
-            }
-
-            if (g.type == Cannon) {
-                const TacticalRules::RootInfo root = TacticalRules::analyzeRoot(board, x, y);
-                const int adv = advanceOf(side, y);
-                const bool useful = isCannonMoveUseful(board, Move(x, y, x, y), side, phase);
-                if (x == 4 && phase > 140) {
-                    score += 18;
-                    if (oppKingX == 4) {
-                        const int minY = std::min(y, oppKingY);
-                        const int maxY = std::max(y, oppKingY);
-                        int between = 0;
-                        for (int fy = minY + 1; fy < maxY; ++fy) {
-                            if (board.getGridAt(4, fy).color != EMPTY) {
-                                ++between;
-                            }
-                        }
-                        if (between == 1) {
-                            score += 38;
-                        } else if (between == 0) {
-                            score += 28; // 空头炮压中路要进一步奖励
-                        }
-                    }
-                } else if (phase > 180 && adv <= 1) {
-                    score -= 8;
-                }
-
-                if (useful && x != 4) {
-                    score += 8;
-                }
-                if (!useful && phase > 170 && adv >= 3 && x != 4) {
-                    score -= 12;
-                }
-                if ((x == 0 || x == 8) && phase > 160 && !useful) {
-                    score -= 12; // 边线炮没有实质压制时应降权
-                }
-
-                // 炮在河岸区域（advance 4-6）但没有有效炮架 => 位置较差
-                if (phase > 150 && adv >= 4 && adv <= 6 && x != 4) {
-                    bool hasMount = false;
-                    for (int md = 0; md < 4 && !hasMount; ++md) {
-                        int mx = x + dx_strai[md];
-                        int my = y + dy_strai[md];
-                        bool foundScreen = false;
-                        while (ChessBoard::inBoard(mx, my)) {
-                            const Grid mg = board.getGridAt(mx, my);
-                            if (mg.color != EMPTY) {
-                                if (!foundScreen) {
-                                    foundScreen = true;
-                                } else {
-                                    if (mg.color == opp &&
-                                        (mg.type == Rook || mg.type == King || mg.type == Knight)) {
-                                        hasMount = true;
-                                    }
-                                    break;
-                                }
-                            }
-                            mx += dx_strai[md];
-                            my += dy_strai[md];
-                        }
-                    }
-                    if (!hasMount) {
-                        score -= 16; // 河岸炮无有效威胁，位置差
-                    }
-                }
-
-                const int flank = flankIndexFromFile(x);
-                if (phase > 150 && flank >= 0) {
-                    const int bishopReply = bishopDevelopmentReplyPotential(board, opp, flank);
-                    if (cannonPressesFlankKnight(board, side, x, y, flank)) {
-                        score += 10;
-                        if (bishopReply >= 6) {
-                            score -= 20; // 炮压马但可被飞象舒服化解
-                        }
-                    }
-                    if (cannonOnlyHarassesFlankPawn(board, side, x, y, flank) && !useful) {
-                        score -= 18;
-                        if (bishopReply >= 4) {
-                            score -= 14;
-                        }
-                    }
-                }
-
-                if (useful) {
-                    score += attackTowardsWeakerFlankBonus(board, side, x, y, Cannon);
-                }
-                if (root.hasRoot && useful) {
-                    score += 8;
-                } else if (root.virtualRoot) {
-                    score -= 8;
-                } else if (root.inDanger && (!useful || adv >= 4)) {
-                    score -= 16;
-                }
-
-                // 沉底炮
-                if (adv >= 8) {
-                    if (bottomCount < 4) {
-                        bottomPieces[bottomCount++] = {x, y, Cannon};
-                    }
-                }
-
-                for (int d = 0; d < 4; ++d) {
-                    int tx = x + dx_strai[d];
-                    int ty = y + dy_strai[d];
-                    bool foundMount = false;
-                    while (ChessBoard::inBoard(tx, ty)) {
-                        const Grid tg = board.getGridAt(tx, ty);
-                        if (!foundMount) {
-                            if (tg.color != EMPTY) {
-                                foundMount = true;
-                            }
-                        } else if (tg.color != EMPTY) {
-                            if (tg.color == opp && (tg.type == Rook || tg.type == King)) {
-                                score += 10;
-                            }
-                            break;
-                        }
-                        tx += dx_strai[d];
-                        ty += dy_strai[d];
-                    }
-                }
-            }
-        }
-    }
-
-    // --- 沉底抽将识别 ---
-    // 车/炮在对方底线附近，如果能将军且同一线路上有对方高价值子可抽 => 额外加分
-    if (oppKingX >= 0) {
-        for (int bi = 0; bi < bottomCount; ++bi) {
-            const int bx = bottomPieces[bi].x;
-            const int by = bottomPieces[bi].y;
-            const stoneType btype = bottomPieces[bi].type;
-
-            if (btype == Rook) {
-                // 车沉底：检查是否在帅的行/列可以将军，并且同行/列有高价值子
-                bool canCheckOnRank = (by == oppKingY && countPiecesBetween(board, bx, by, oppKingX, oppKingY) == 0);
-                bool canCheckOnFile = (bx == oppKingX && countPiecesBetween(board, bx, by, oppKingX, oppKingY) == 0);
-
-                if (canCheckOnRank) {
-                    // 车在帅同行，将军后看同列是否有对方大子可抽
-                    for (int fy = 0; fy < BOARDHEIGHT; ++fy) {
-                        if (fy == by) continue;
-                        const Grid tg = board.getGridAt(bx, fy);
-                        if (tg.color == opp && (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
-                            score += 16; // 抽将潜力
-                        }
-                    }
-                }
-                if (canCheckOnFile) {
-                    // 车在帅同列，将军后看同行是否有对方大子可抽
-                    for (int fx = 0; fx < BOARDWIDTH; ++fx) {
-                        if (fx == bx) continue;
-                        const Grid tg = board.getGridAt(fx, by);
-                        if (tg.color == opp && (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
-                            score += 16;
-                        }
-                    }
-                }
-            }
-
-            if (btype == Cannon) {
-                // 炮沉底：如果炮与帅在同一列且有炮架 => 将军牵制
-                if (bx == oppKingX) {
-                    int between = countPiecesBetween(board, bx, by, oppKingX, oppKingY);
-                    if (between == 1) {
-                        score += 12; // 炮架已形成，将军威胁
-                        // 检查同行是否有对方大子，形成牵制/串打
-                        for (int fx = 0; fx < BOARDWIDTH; ++fx) {
-                            if (fx == bx) continue;
-                            const Grid tg = board.getGridAt(fx, by);
-                            if (tg.color == opp && (tg.type == Rook || tg.type == Knight)) {
-                                score += 10;
-                            }
-                        }
-                    }
-                }
-                // 炮与帅同行
-                if (by == oppKingY) {
-                    int between = countPiecesBetween(board, bx, by, oppKingX, oppKingY);
-                    if (between == 1) {
-                        score += 12;
-                        for (int fy = 0; fy < BOARDHEIGHT; ++fy) {
-                            if (fy == by) continue;
-                            const Grid tg = board.getGridAt(bx, fy);
-                            if (tg.color == opp && (tg.type == Rook || tg.type == Knight)) {
-                                score += 10;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // 双车联通
-    if (rookCount == 2) {
-        bool connected = false;
-        if (rookX[0] == rookX[1]) {
-            connected = true;
-            const int lo = std::min(rookY[0], rookY[1]);
-            const int hi = std::max(rookY[0], rookY[1]);
-            for (int y = lo + 1; y < hi; ++y) {
-                if (board.getGridAt(rookX[0], y).color != EMPTY) {
-                    connected = false;
-                    break;
-                }
-            }
-        } else if (rookY[0] == rookY[1]) {
-            connected = true;
-            const int lo = std::min(rookX[0], rookX[1]);
-            const int hi = std::max(rookX[0], rookX[1]);
-            for (int x = lo + 1; x < hi; ++x) {
-                if (board.getGridAt(x, rookY[0]).color != EMPTY) {
-                    connected = false;
-                    break;
-                }
-            }
-        }
-        if (connected) {
-            score += 12;
-        }
-    }
-
-    return score;
-}
-
-// =====================================================================
-// 总评估
-// =====================================================================
-int AIPlayer::evaluate(const ChessBoard& board) const {
+int AIPlayer::evaluate(const ChessBoard& board, int vlAlpha, int vlBeta) const {
     const colorType side = board.currentColor();
     const colorType opp = ChessBoard::oppColor(side);
-    const int phase = endgamePhase(board);
 
-    return evalMaterial(board, side, phase)
-         + evalPosition(board, side)
-         + (evalKingSafety(board, side) - evalKingSafety(board, opp))
-         + evalMobility(board, side, phase)
-         + (evalPawnStructure(board, side) - evalPawnStructure(board, opp))
-         + evalPawnAdvancement(board, side, phase)
-         + (evalAttackPressure(board, side) - evalAttackPressure(board, opp))
-         + (evalDevelopment(board, side, phase) - evalDevelopment(board, opp, phase))
-         + (evalPieceActivity(board, side, phase) - evalPieceActivity(board, opp, phase));
+    // Eye lazy eval margin constants
+    static constexpr int EVAL_MARGIN1 = 160;
+    static constexpr int EVAL_MARGIN2 = 80;
+    static constexpr int EVAL_MARGIN3 = 40;
+    static constexpr int EVAL_MARGIN4 = 20;
+
+    // 1. Material + PST (最大开销项)
+    int vl = evalPosition(board, side);
+    if (vl + EVAL_MARGIN1 <= vlAlpha) return vl + EVAL_MARGIN1;
+    if (vl - EVAL_MARGIN1 >= vlBeta)  return vl - EVAL_MARGIN1;
+
+    // 2. AdvisorShape
+    vl += advisorShapeScore(board, side) - advisorShapeScore(board, opp);
+    if (vl + EVAL_MARGIN2 <= vlAlpha) return vl + EVAL_MARGIN2;
+    if (vl - EVAL_MARGIN2 >= vlBeta)  return vl - EVAL_MARGIN2;
+
+    // 3. StringHold
+    vl += stringHoldScore(board, side) - stringHoldScore(board, opp);
+    if (vl + EVAL_MARGIN3 <= vlAlpha) return vl + EVAL_MARGIN3;
+    if (vl - EVAL_MARGIN3 >= vlBeta)  return vl - EVAL_MARGIN3;
+
+    // 4. RookMobility
+    vl += rookMobilityScore(board, side) - rookMobilityScore(board, opp);
+    if (vl + EVAL_MARGIN4 <= vlAlpha) return vl + EVAL_MARGIN4;
+    if (vl - EVAL_MARGIN4 >= vlBeta)  return vl - EVAL_MARGIN4;
+
+    // 5. KnightTrap (最后一项，完整计算)
+    vl += knightTrapScore(board, side) - knightTrapScore(board, opp);
+
+    return vl;
 }
-
+// =====================================================================
+// 评估 6：悬挂子惩罚（大子被攻击且无人防守）
+// leaf eval 直接体现悬挂，不需要靠 QSearch "看见" 被吃
+// =====================================================================
 // =====================================================================
 // TT 操作
 // =====================================================================
-int AIPlayer::scoreToTT(int score, int ply) const {
-    if (score > MATE_SCORE - MAX_DEPTH) {
-        return score + ply;
-    }
-    if (score < -MATE_SCORE + MAX_DEPTH) {
-        return score - ply;
-    }
-    return score;
-}
-
-int AIPlayer::scoreFromTT(int score, int ply) const {
-    if (score > MATE_SCORE - MAX_DEPTH) {
-        return score - ply;
-    }
-    if (score < -MATE_SCORE + MAX_DEPTH) {
-        return score + ply;
-    }
-    return score;
-}
-
-void AIPlayer::ttStore(uint64_t key, int depth, int score, TTFlag flag,
-                       const Move& bestMove, int ply) const {
-    const int idx = static_cast<int>(key & TT_MASK);
-    TTEntry& entry = tt_[idx];
-    if (entry.key != key || depth >= entry.depth || entry.age != searchAge_) {
-        entry.key = key;
-        entry.depth = static_cast<int16_t>(depth);
-        entry.score = scoreToTT(score, ply);
-        entry.bestMove = bestMove;
-        entry.flag = flag;
-        entry.age = searchAge_;
-    }
-}
-
-bool AIPlayer::ttProbe(uint64_t key, int depth, int alpha, int beta,
-                       int& score, Move& ttMove, int ply) const {
-    const int idx = static_cast<int>(key & TT_MASK);
-    const TTEntry& entry = tt_[idx];
-    if (entry.key != key) {
-        return false;
-    }
-
-    ttMove = entry.bestMove;
-    if (entry.depth < depth) {
-        return false;
-    }
-
-    score = scoreFromTT(entry.score, ply);
-    switch (entry.flag) {
-        case TT_EXACT:      return true;
-        case TT_LOWERBOUND: return score >= beta;
-        case TT_UPPERBOUND: return score <= alpha;
-    }
-    return false;
-}
-
 // =====================================================================
-// Killer / History / Counter-move
+// Eye-style pack/unpack Move <-> uint16_t
 // =====================================================================
+uint16_t AIPlayer::packMove(const Move& mv) {
+    if (mv.isInvalid()) return 0;
+    const int sqSrc = xy2sq(mv.source_x, mv.source_y);
+    const int sqDst = xy2sq(mv.target_x, mv.target_y);
+    return static_cast<uint16_t>((sqSrc << 8) | sqDst);
+}
+
+Move AIPlayer::unpackMove(uint16_t wmv) {
+    if (wmv == 0) return Move();
+    const int sqSrc = (wmv >> 8) & 0xff;
+    const int sqDst = wmv & 0xff;
+    Move mv;
+    mv.source_x = sq2x(sqSrc);
+    mv.source_y = sq2y(sqSrc);
+    mv.target_x = sq2x(sqDst);
+    mv.target_y = sq2y(sqDst);
+    return mv;
+}
+
+int AIPlayer::scoreToTT(const ChessBoard& board, int vl) const {
+    if (vl > WIN_SCORE) {
+        if (vl <= BAN_SCORE) return vl;
+        return vl + board.getDistance();
+    } else if (vl < -WIN_SCORE) {
+        if (vl >= -BAN_SCORE) return vl;
+        return vl - board.getDistance();
+    }
+    return vl;
+}
+
+int AIPlayer::scoreFromTT(const ChessBoard& board, int vl) const {
+    if (vl > WIN_SCORE) {
+        if (vl <= BAN_SCORE) return vl;
+        return vl - board.getDistance();
+    } else if (vl < -WIN_SCORE) {
+        if (vl >= -BAN_SCORE) return vl;
+        return vl + board.getDistance();
+    }
+    return vl;
+}
+
+void AIPlayer::ttStore(const ChessBoard& board, int nFlag, int vl,
+                       int nDepth, const Move& mv) const {
+    const size_t needSize = static_cast<size_t>(TT_SIZE) * HASH_LAYERS;
+    if (tt_.size() != needSize) {
+        tt_.assign(needSize, TTEntry{});
+    }
+
+    const uint32_t dwLock0 = board.getZobrist().dwLock0;
+    const uint32_t dwLock1 = board.getZobrist().dwLock1;
+    const size_t baseIdx =
+        static_cast<size_t>(board.getZobrist().dwKey & TT_MASK) * HASH_LAYERS;
+    const uint16_t wmv = packMove(mv);
+
+    int storedVl = vl;
+    if (vl > WIN_SCORE || vl < -WIN_SCORE) {
+        storedVl = scoreToTT(board, vl);
+    }
+
+    int minDepth = 512;
+    int minLayer = 0;
+
+    for (int i = 0; i < HASH_LAYERS; ++i) {
+        TTEntry& hsh = tt_[baseIdx + static_cast<size_t>(i)];
+
+        if (hsh.dwLock0 == dwLock0 && hsh.dwLock1 == dwLock1) {
+            if ((nFlag & HASH_ALPHA) != 0 &&
+                (hsh.ucAlphaDepth <= nDepth || hsh.svlAlpha >= storedVl)) {
+                hsh.ucAlphaDepth = static_cast<uint8_t>(nDepth);
+                hsh.svlAlpha = static_cast<int16_t>(storedVl);
+            }
+            if ((nFlag & HASH_BETA) != 0 &&
+                (hsh.ucBetaDepth <= nDepth || hsh.svlBeta <= storedVl)) {
+                hsh.ucBetaDepth = static_cast<uint8_t>(nDepth);
+                hsh.svlBeta = static_cast<int16_t>(storedVl);
+            }
+            if (wmv != 0) {
+                hsh.wmvPacked = wmv;
+            }
+            return;
+        }
+
+        const int slotDepth =
+            std::min(static_cast<int>(hsh.ucAlphaDepth),
+                     static_cast<int>(hsh.ucBetaDepth));
+
+        if (hsh.dwLock0 == 0 && hsh.dwLock1 == 0) {
+            minLayer = i;
+            minDepth = -1;
+            break;
+        }
+        if (slotDepth < minDepth) {
+            minDepth = slotDepth;
+            minLayer = i;
+        }
+    }
+
+    TTEntry& hsh = tt_[baseIdx + static_cast<size_t>(minLayer)];
+    hsh.dwLock0 = dwLock0;
+    hsh.dwLock1 = dwLock1;
+    hsh.wmvPacked = wmv;
+    hsh.ucAlphaDepth = 0;
+    hsh.ucBetaDepth = 0;
+    hsh.svlAlpha = 0;
+    hsh.svlBeta = 0;
+
+    if ((nFlag & HASH_ALPHA) != 0) {
+        hsh.ucAlphaDepth = static_cast<uint8_t>(nDepth);
+        hsh.svlAlpha = static_cast<int16_t>(storedVl);
+    }
+    if ((nFlag & HASH_BETA) != 0) {
+        hsh.ucBetaDepth = static_cast<uint8_t>(nDepth);
+        hsh.svlBeta = static_cast<int16_t>(storedVl);
+    }
+}
+
+int AIPlayer::ttProbe(const ChessBoard& board, int vlAlpha, int vlBeta,
+                      int nDepth, bool bNoNull, Move& ttMove) const {
+    ttMove = Move();
+
+    const size_t needSize = static_cast<size_t>(TT_SIZE) * HASH_LAYERS;
+    if (tt_.size() != needSize) {
+        return -MATE_SCORE;
+    }
+
+    const uint32_t dwLock0 = board.getZobrist().dwLock0;
+    const uint32_t dwLock1 = board.getZobrist().dwLock1;
+    const size_t baseIdx =
+        static_cast<size_t>(board.getZobrist().dwKey & TT_MASK) * HASH_LAYERS;
+
+    for (int i = 0; i < HASH_LAYERS; ++i) {
+        const TTEntry& hsh = tt_[baseIdx + static_cast<size_t>(i)];
+        if (hsh.dwLock0 != dwLock0 || hsh.dwLock1 != dwLock1) {
+            continue;
+        }
+
+        if (hsh.wmvPacked != 0) {
+            Move cand = unpackMove(hsh.wmvPacked);
+            if (ChessBoard::inBoard(cand.source_x, cand.source_y) &&
+                ChessBoard::inBoard(cand.target_x, cand.target_y)) {
+                ttMove = cand;
+            }
+        }
+
+        if (!bNoNull && hsh.ucAlphaDepth >= nDepth) {
+            const int vl = scoreFromTT(board, hsh.svlAlpha);
+            if (vl <= vlAlpha) {
+                return vl;
+            }
+        }
+
+        if (hsh.ucBetaDepth >= nDepth) {
+            const int vl = scoreFromTT(board, hsh.svlBeta);
+            if (vl >= vlBeta) {
+                return vl;
+            }
+        }
+    }
+
+    return -MATE_SCORE;
+}
 void AIPlayer::updateKiller(int ply, const Move& mv) const {
+    if (ply < 0 || ply >= MAX_DEPTH) return;
     if (!(killers_[ply][0] == mv)) {
         killers_[ply][1] = killers_[ply][0];
         killers_[ply][0] = mv;
@@ -2205,7 +1511,8 @@ void AIPlayer::updateKiller(int ply, const Move& mv) const {
 void AIPlayer::updateHistory(colorType side, const Move& mv, int depth) const {
     const int colorIdx = static_cast<int>(side);
     const int from = mv.source_x * BOARDHEIGHT + mv.source_y;
-    const int to = mv.target_x * BOARDHEIGHT + mv.target_y;
+    const int to   = mv.target_x * BOARDHEIGHT + mv.target_y;
+
     history_[colorIdx][from][to] += depth * depth;
     if (history_[colorIdx][from][to] > 800000) {
         for (int i = 0; i < BOARDWIDTH * BOARDHEIGHT; ++i) {
@@ -2217,1188 +1524,807 @@ void AIPlayer::updateHistory(colorType side, const Move& mv, int depth) const {
 }
 
 void AIPlayer::updateCounterMove(colorType side, const Move& prev, const Move& cur) const {
-    if (prev.isInvalid()) {
-        return;
-    }
+    if (prev.isInvalid()) return;
     const int colorIdx = static_cast<int>(side);
     const int from = prev.source_x * BOARDHEIGHT + prev.source_y;
-    const int to = prev.target_x * BOARDHEIGHT + prev.target_y;
+    const int to   = prev.target_x * BOARDHEIGHT + prev.target_y;
     counterMoves_[colorIdx][from][to] = cur;
 }
 
 bool AIPlayer::isKiller(int ply, const Move& mv) const {
+    if (ply < 0 || ply >= MAX_DEPTH) return false;
     return killers_[ply][0] == mv || killers_[ply][1] == mv;
 }
 
 bool AIPlayer::isCounterMove(colorType side, const Move& prev, const Move& mv) const {
-    if (prev.isInvalid()) {
-        return false;
-    }
+    if (prev.isInvalid()) return false;
     const int colorIdx = static_cast<int>(side);
     const int from = prev.source_x * BOARDHEIGHT + prev.source_y;
-    const int to = prev.target_x * BOARDHEIGHT + prev.target_y;
+    const int to   = prev.target_x * BOARDHEIGHT + prev.target_y;
     return counterMoves_[colorIdx][from][to] == mv;
 }
 
-// =====================================================================
-// 走法排序（含炮乱动惩罚、六大子发展奖励、将军阶段化、抽将奖励）
-// =====================================================================
-int AIPlayer::scoreMoveForOrdering(const ChessBoard& board, const Move& move,
-                                   int ply, const Move& ttMove,
-                                   int oppKingX, int oppKingY,
-                                   int phase, bool sideInCheck) const {
-    if (move == ttMove) {
-        return 2000000000;
-    }
-
-    const Grid source = board.getGridAt(move.source_x, move.source_y);
-    const Grid target = board.getGridAt(move.target_x, move.target_y);
-    int score = 0;
-
-    // 吃子步：MVV-LVA
-    if (target.color != EMPTY && target.color != source.color) {
-        int captureScore = 1000000 + pieceBaseValue(target.type) * 10 - pieceBaseValue(source.type);
-
-        // "帮对方活子"惩罚：吃对方还在初始位受限的低价值子，赶走后反而帮对方
-        if (phase > 160) {
-            // 吃对方初始位置的马 => 帮对方出马
-            if (target.type == Knight && !isDevelopedKnight(target.color, move.target_x, move.target_y)) {
-                captureScore -= 200;
-            }
-        }
-
-        return captureScore;
-    }
-
-    // 将军方向加分（与局面危险程度挂钩）
-    // 统计对方在我方半场的深入大子数，作为局面紧张度参考
-    const colorType mySide = source.color;
-    const int enemyDeep = countEnemyDeepMajors(board, mySide);
-    // 当对方深入大子 >= 2 或者 phase < 140（中局偏后）时，将军权重更高
-    const bool checkingPhase = (enemyDeep >= 2 || phase < 140);
-
-    if (oppKingX >= 0) {
-        const int tx = move.target_x;
-        const int ty = move.target_y;
-
-        // 将军方向奖励与局面紧张度关联：越紧张奖励越高
-        int checkBonus;
-        if (checkingPhase) {
-            checkBonus = 300000;
-        } else if (phase > 200 && enemyDeep == 0) {
-            checkBonus = 50000; // 开局且无敌深入 => 将军优先级很低
-        } else {
-            checkBonus = 120000;
-        }
-
-        if (source.type == Rook && (tx == oppKingX || ty == oppKingY)) {
-            score += checkBonus;
-
-            // 抽将识别：车到帅的行/列，且同线上有对方大子
-            if (tx == oppKingX && countPiecesBetween(board, tx, ty, oppKingX, oppKingY) == 0) {
-                // 车同列将军 => 看同行是否有对方大子可抽
-                for (int fx = 0; fx < BOARDWIDTH; ++fx) {
-                    if (fx == tx) continue;
-                    const Grid tg = board.getGridAt(fx, ty);
-                    if (tg.color == ChessBoard::oppColor(mySide) &&
-                        (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
-                        score += 80000; // 抽将潜力大加分
-                        break;
-                    }
-                }
-            }
-            if (ty == oppKingY && countPiecesBetween(board, tx, ty, oppKingX, oppKingY) == 0) {
-                for (int fy = 0; fy < BOARDHEIGHT; ++fy) {
-                    if (fy == ty) continue;
-                    const Grid tg = board.getGridAt(tx, fy);
-                    if (tg.color == ChessBoard::oppColor(mySide) &&
-                        (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
-                        score += 80000;
-                        break;
-                    }
-                }
-            }
-        } else if (source.type == Cannon && (tx == oppKingX || ty == oppKingY)) {
-            score += (checkBonus * 9 / 10); // 炮将军略低于车
-
-            // 炮将军抽将
-            if (tx == oppKingX) {
-                int between = countPiecesBetween(board, tx, ty, oppKingX, oppKingY);
-                if (between == 1) {
-                    // 有炮架 => 真将军
-                    for (int fx = 0; fx < BOARDWIDTH; ++fx) {
-                        if (fx == tx) continue;
-                        const Grid tg = board.getGridAt(fx, ty);
-                        if (tg.color == ChessBoard::oppColor(mySide) &&
-                            (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
-                            score += 60000;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (ty == oppKingY) {
-                int between = countPiecesBetween(board, tx, ty, oppKingX, oppKingY);
-                if (between == 1) {
-                    for (int fy = 0; fy < BOARDHEIGHT; ++fy) {
-                        if (fy == ty) continue;
-                        const Grid tg = board.getGridAt(tx, fy);
-                        if (tg.color == ChessBoard::oppColor(mySide) &&
-                            (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
-                            score += 60000;
-                            break;
-                        }
-                    }
-                }
-            }
-        } else if (source.type == Knight) {
-            const int dx = std::abs(tx - oppKingX);
-            const int dy = std::abs(ty - oppKingY);
-            if ((dx == 2 && dy == 1) || (dx == 1 && dy == 2)) {
-                score += (checkBonus * 95 / 100);
-            }
-        } else if (source.type == Pawn) {
-            if (std::abs(tx - oppKingX) + std::abs(ty - oppKingY) == 1) {
-                score += (checkingPhase ? 200000 : 80000);
-            }
-        }
-    }
-
-    // 被将军时的应对
-    if (sideInCheck) {
-        if (source.type == King) {
-            score += 80000;
-        } else if (source.type == Assistant || source.type == Bishop) {
-            score += 35000;
-        }
-    }
-
-    // Killer / Counter-move
-    if (isKiller(ply, move)) {
-        score += 150000;
-    }
-    if (ply > 0 && isCounterMove(source.color, prevMove_[ply - 1], move)) {
-        score += 120000;
-    }
-
-    // History
-    const int colorIdx = static_cast<int>(source.color);
-    const int from = move.source_x * BOARDHEIGHT + move.source_y;
-    const int to = move.target_x * BOARDHEIGHT + move.target_y;
-    score += history_[colorIdx][from][to] / 100;
-
-    // PST 变化
-    const int pstDiff = positionValue(source.type, source.color, move.target_x, move.target_y)
-                      - positionValue(source.type, source.color, move.source_x, move.source_y);
-    score += (source.type == Rook || source.type == Cannon || source.type == Knight) ? pstDiff * 2 : pstDiff;
-
-    if (source.type == Rook || source.type == Cannon || source.type == Knight || source.type == Pawn) {
-        const bool sourceUnderAttack = const_cast<ChessBoard&>(board).attacked(
-            ChessBoard::oppColor(source.color), move.source_x, move.source_y);
-        if (sourceUnderAttack || target.color != EMPTY || phase > 180) {
-            const TacticalRules::MoveTacticalInfo tactical = TacticalRules::analyzeMove(
-                const_cast<ChessBoard&>(board), move);
-            score += tactical.activityDelta * 8;
-            score += tactical.destinationExchangeScore;
-            score += (tactical.destinationWeightedNet - tactical.sourceWeightedNet) / 2;
-            if (tactical.improvesByRunning) {
-                score += 220; // 被攻击时，跑到更好更安全的位置应优先
-            }
-            if (tactical.canRootSafely) {
-                score += 90; // 生根后交换不亏，排序应提前
-            }
-            if (tactical.prefersTrade) {
-                score += 120; // 车炮对棋若有利，应敢于简化
-            }
-            if (sourceUnderAttack && !tactical.destinationSafer) {
-                score -= 180; // 被打却只是机械挪一下，降权
-            }
-            if (target.color != EMPTY && (source.type == Rook || source.type == Cannon) && tactical.tradeScore < -30) {
-                score -= 140; // 不利的对车对炮不应盲目交换
-            }
-        }
-    }
-
-    if (phase > 140 && (source.type == Rook || source.type == Knight || source.type == Cannon)) {
-        score += attackTowardsWeakerFlankBonus(board, source.color, move.target_x, move.target_y, source.type) * 18;
-    }
-
-    // 回退步惩罚
-    if (ply >= 2 && isBacktrack(move, prevMove_[ply - 2])) {
-        if (phase > 160 && (source.type == Cannon || source.type == Knight || source.type == Rook)) {
-            score -= 260;
-        } else {
-            score -= 120;
-        }
-    }
-
-    // 开局避免同一大子反复承担全部任务
-    if (phase > 170 && ply >= 2 &&
-        prevMove_[ply - 2].target_x == move.source_x &&
-        prevMove_[ply - 2].target_y == move.source_y) {
-        if (source.type == Cannon) {
-            score -= 240;
-        } else if (source.type == Rook) {
-            score -= 160;
-        } else if (source.type == Knight) {
-            score -= 120;
-        }
-    }
-
-    // 开局阶段特化
-    if (phase > 96) {
-        if (source.type == Rook) {
-            const int adv = advanceOf(source.color, move.target_y);
-            if (isNaturalRookDevelopmentMove(source.color, move)) {
-                score += 360; // 车一平二、进一步出车、士位出车优先
-            }
-            if (adv >= 2) {
-                score += 280;
-            }
-            if (move.target_x == 3 || move.target_x == 5) {
-                score += 220;
-            }
-            if (move.target_y == homeRank(source.color) && (move.target_x == 1 || move.target_x == 7)) {
-                score += 120;
-            }
-            const int riverRank = (source.color == RED) ? 4 : 5;
-            if (move.target_y == riverRank || move.target_y == riverRank + ((source.color == RED) ? 1 : -1)) {
-                score += 160;
-            }
-            const int fileQuality = rookFileQuality(board, source.color, move.target_x);
-            if (fileQuality == 2) {
-                score += 80;
-            } else if (fileQuality == 1) {
-                score += 40;
-            }
-            if (phase > 170 && isMeaninglessEarlyRookShift(source.color, move)) {
-                score -= 260;
-            }
-            // 开局车出动优先级应比炮高
-            if (phase > 170 && !isDevelopedRook(source.color, move.source_x, move.source_y)) {
-                score += 300; // 还没出动的车，出子步加分
-            }
-        }
-        if (source.type == Knight) {
-            const int adv = advanceOf(source.color, move.target_y);
-            const bool toNormal = isNormalKnightSquare(source.color, move.target_x, move.target_y);
-            if (adv >= 3) {
-                score += 180;
-            }
-            // 马离开初始位 => 出子奖励
-            if (phase > 170 && !isDevelopedKnight(source.color, move.source_x, move.source_y)
-                && isDevelopedKnight(source.color, move.target_x, move.target_y)) {
-                score += toNormal ? 420 : 120;
-            }
-            if (toNormal) {
-                score += 200;
-            } else if (phase > 170 && adv <= 2) {
-                score -= 160; // 早期边马、怪马不优先
-            }
-            const int pawnFile = (move.target_x <= 4) ? 2 : 6;
-            if (toNormal && flankPawnAdvanced(board, source.color, pawnFile)) {
-                score += 80; // 已有三七兵配合时，正马更值得优先
-            }
-        }
-        if (source.type == Pawn && phase > 160 && (move.source_x == 2 || move.source_x == 6) &&
-            move.target_x == move.source_x && move.target_y == move.source_y + forwardDir(source.color)) {
-            const int knightX = move.source_x;
-            const int knightY = (source.color == RED) ? 2 : 7;
-            const Grid wingKnight = board.getGridAt(knightX, knightY);
-            if (wingKnight.color == source.color && wingKnight.type == Knight &&
-                isNormalKnightSquare(source.color, knightX, knightY)) {
-                score += 140; // 三七兵活正马
-            } else {
-                score -= 40; // 没有实际活马时，不鼓励机械冲兵
-            }
-        }
-        if (source.type == Cannon) {
-            const bool useful = isCannonMoveUseful(board, move, source.color, phase);
-            if (move.target_x == 4 && phase > 160) {
-                score += 260; // 中炮
-                if (!isDevelopedCannon(source.color, move.source_x, move.source_y)) {
-                    score += 180;
-                }
-                if (oppKingX == 4) {
-                    score += 120;
-                }
-            }
-            if (useful) {
-                score += 180;
-            }
-
-            // ---- 炮乱动惩罚 ----
-            // 开局炮不应该无意义跑到河岸去追打对方车
-            if (phase > 160) {
-                const int cannonAdv = advanceOf(source.color, move.target_y);
-                const int reliefPenalty = cannonNaturalReliefPenalty(const_cast<ChessBoard&>(board), move, source.color);
-                score -= reliefPenalty;
-
-                // 炮到河岸（advance 4~6）但没有形成有效战术构型 => 强烈降权
-                if (cannonAdv >= 4 && cannonAdv <= 6) {
-                    if (!useful) {
-                        score -= 600; // 强烈惩罚无意义的河岸炮
-                    }
-                }
-
-                // 炮横移（停在同一前进度）但不在中路且不在肋道 => 可能无意义
-                if (move.source_y == move.target_y && move.target_x != 4
-                    && move.target_x != 3 && move.target_x != 5
-                    && cannonAdv <= 3) {
-                    score -= 220;
-                }
-
-                // 炮早期前压到对方半场非底线位置，没有明显战术 => 帮对方活子
-                if (cannonAdv >= 5 && cannonAdv <= 7) {
-                    if (!useful) {
-                        score -= 450;
-                    }
-                }
-            }
-
-            // 炮还在初始位附近但不去中路
-            if (advanceOf(source.color, move.target_y) <= 2 && move.target_x != 4) {
-                score -= 120;
-            }
-
-            // 不在初始位的炮横移不去中路 => 可能无意义
-            if (move.source_y != initialCannonRank(source.color) &&
-                move.target_x != 4 && move.target_y == move.source_y && phase > 170) {
-                score -= 140;
-            }
-        }
-        if (source.type == King && !sideInCheck) {
-            const int hY = homeRank(source.color);
-            score -= (std::abs(move.target_x - 4) + std::abs(move.target_y - hY)) * 90;
-        }
-    }
-
-    // 开局炮优于马，残局相反
-    if (phase > 180) {
-        if (source.type == Cannon) {
-            score += 30;
-        }
-    } else if (phase < 100) {
-        if (source.type == Knight) {
-            score += 30;
-        }
-    }
-
-    // 向对方帅靠近
-    if (oppKingX >= 0) {
-        const int oldDist = std::abs(move.source_x - oppKingX) + std::abs(move.source_y - oppKingY);
-        const int newDist = std::abs(move.target_x - oppKingX) + std::abs(move.target_y - oppKingY);
-        if (newDist < oldDist) {
-            int bonus = (oldDist - newDist) * 15;
-            // 开局阶段炮不应盲目前冲靠近对方帅
-            if (source.type == Cannon && phase > 160) {
-                bonus = bonus / 3;
-            }
-            score += bonus;
-        }
-    }
-
-    return score;
-}
-
-void AIPlayer::orderMoves(const ChessBoard& board, std::vector<Move>& moves,
-                          int ply, const Move& ttMove) const {
-    const colorType opp = board.oppColor();
-    int oppKingX = -1;
-    int oppKingY = -1;
-    board.findKing(opp, oppKingX, oppKingY);
-    const int phase = endgamePhase(board);
-    const bool sideInCheck = board.isInCheck();
-
-    std::vector<std::pair<int, int>> scored(moves.size());
-    for (int i = 0; i < static_cast<int>(moves.size()); ++i) {
-        scored[i] = std::make_pair(
-            scoreMoveForOrdering(board, moves[i], ply, ttMove, oppKingX, oppKingY, phase, sideInCheck),
-            i);
-    }
-    std::sort(scored.begin(), scored.end(), [](const auto& lhs, const auto& rhs) {
-        return lhs.first > rhs.first;
-    });
-
-    std::vector<Move> sorted;
-    sorted.reserve(moves.size());
-    for (const auto& item : scored) {
-        sorted.push_back(moves[item.second]);
-    }
-    moves.swap(sorted);
-}
-
-int AIPlayer::scoreRootMove(const ChessBoard& board, const RootMoveInfo& moveInfo,
-                            const Move& pvMove, int currentDanger, int phase) const {
-    if (moveInfo.move == pvMove) {
-        return 2000000000;
-    }
-
-    int score = moveInfo.staticScore;
-    if (moveInfo.searchedDepth > 0) {
-        score += clampInt(moveInfo.lastScore, -4000, 4000) * 24;
-        score += moveInfo.searchedDepth * 200;
-    }
-
-    const Grid source = board.getGridAt(moveInfo.move.source_x, moveInfo.move.source_y);
-    const TacticalRules::MoveTacticalInfo tactical = TacticalRules::analyzeMove(
-        const_cast<ChessBoard&>(board), moveInfo.move);
-    score += tactical.activityDelta * 12;
-    score += tactical.destinationExchangeScore * 2;
-    score += tactical.destinationWeightedNet - tactical.sourceWeightedNet;
-    if (tactical.improvesByRunning) {
-        score += 240;
-    }
-    if (tactical.canRootSafely) {
-        score += 120;
-    }
-    if (tactical.prefersTrade) {
-        score += 150;
-    }
-
-    if (currentDanger >= 80) {
-        if (source.type == King) {
-            score += 1500;
-        } else if (source.type == Assistant || source.type == Bishop) {
-            score += 900;
-        } else if (source.type == Rook) {
-            score += 400;
-        }
-    } else if (phase > 170 && source.type == King) {
-        score -= 800;
-    }
-
-    // 开局：惩罚炮的根节点步如果是无意义骚扰
-    if (phase > 160 && source.type == Cannon) {
-        const int cannonAdv = advanceOf(source.color, moveInfo.move.target_y);
-        if (cannonAdv >= 4 && cannonAdv <= 7) {
-            if (!isCannonMoveUseful(board, moveInfo.move, source.color, phase)) {
-                score -= 5000;
-            }
-        }
-        score -= cannonNaturalReliefPenalty(const_cast<ChessBoard&>(board), moveInfo.move, source.color) * 8;
-    }
-
-    if ((source.type == Rook || source.type == Cannon) && tactical.tradeScore < -40) {
-        score -= 220;
-    }
-
-    return score;
-}
-
-void AIPlayer::orderRootMoves(const ChessBoard& board, std::vector<RootMoveInfo>& moves,
-                              const Move& pvMove, int currentDanger) const {
-    const int phase = endgamePhase(board);
-    std::stable_sort(moves.begin(), moves.end(), [&](const RootMoveInfo& lhs, const RootMoveInfo& rhs) {
-        return scoreRootMove(board, lhs, pvMove, currentDanger, phase) >
-               scoreRootMove(board, rhs, pvMove, currentDanger, phase);
-    });
-}
-
-// =====================================================================
-// 时间控制
-// =====================================================================
-int AIPlayer::elapsedMs() const {
-    return static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now() - searchStart_).count());
-}
-
-void AIPlayer::allocateTimeBudget(const ChessBoard& board, int rootMoveCount) const {
-    int hard = HARD_TIME_BASE_MS;
-    int soft = SOFT_TIME_BASE_MS;
-    const int phase = endgamePhase(board);
-
-    if (board.isInCheck()) {
-        hard += 30;
-        soft += 50;
-    }
-    if (rootMoveCount <= 6) {
-        hard += 25;
-        soft += 40;
-    } else if (rootMoveCount >= 28) {
-        hard -= 40;
-        soft -= 60;
-    } else if (rootMoveCount >= 20) {
-        hard -= 20;
-        soft -= 35;
-    }
-    if (phase < 90) {
-        hard += 20;
-        soft += 20;
-    }
-    if (phase > 210 && rootMoveCount > 22) {
-        soft -= 20;
-    }
-
-    hardTimeMs_ = clampInt(hard, HARD_TIME_MIN_MS, HARD_TIME_MAX_MS);
-    softTimeMs_ = clampInt(soft, SOFT_TIME_MIN_MS, SOFT_TIME_MAX_MS);
-    if (softTimeMs_ > hardTimeMs_ - 120) {
-        softTimeMs_ = hardTimeMs_ - 120;
-    }
-    allocatedTimeMs_ = hardTimeMs_;
-}
-
-bool AIPlayer::checkTime() const {
-    if (timeUp_) {
-        return true;
-    }
-    if ((nodesSearched_ & TIME_CHECK_MASK) != 0) {
-        return false;
-    }
-    if (elapsedMs() >= hardTimeMs_) {
-        timeUp_ = true;
-        return true;
-    }
-    return false;
-}
-
-bool AIPlayer::softTimeUp() const {
-    return elapsedMs() >= softTimeMs_;
-}
-
-bool AIPlayer::shouldStopForNextDepth(int depth, int rootMoveCount) const {
-    if (timeUp_) {
-        return true;
-    }
-
-    const int elapsed = elapsedMs();
-    if (elapsed >= softTimeMs_) {
-        return true;
-    }
-    if (depth <= 2 || lastIterationMs_ <= 0) {
-        return false;
-    }
-
-    int projected = lastIterationMs_;
-    if (completedDepth_ >= 6) {
-        projected = projected * 17 / 10;
-    } else if (completedDepth_ >= 4) {
-        projected = projected * 3 / 2;
-    }
-    if (rootMoveCount >= 20) {
-        projected = projected * 11 / 10;
-    }
-    if (bestMoveChanges_ >= 2) {
-        projected += 20;
-    }
-
-    if (elapsed + projected >= softTimeMs_) {
-        return true;
-    }
-    return elapsed + projected / 2 >= hardTimeMs_ - 10;
-}
-
-// =====================================================================
-// 初始化搜索状态
-// =====================================================================
 void AIPlayer::initSearchState() const {
-    if (tt_.empty()) {
-        tt_.resize(TT_SIZE);
+    const size_t needSize = static_cast<size_t>(TT_SIZE) * HASH_LAYERS;
+    if (tt_.size() != needSize) {
+        tt_.assign(needSize, TTEntry{});
     }
-    std::memset(history_, 0, sizeof(history_));
+
+    timeUp_ = false;
+    nodesSearched_ = 0;
+    lastIterationMs_ = 0;
+    completedDepth_ = 0;
+    bestMoveChanges_ = 0;
+    allocatedTimeMs_ = HARD_TIME_BASE_MS;
+    softTimeMs_ = SOFT_TIME_BASE_MS;
+    hardTimeMs_ = HARD_TIME_BASE_MS;
+
     for (int ply = 0; ply < MAX_DEPTH; ++ply) {
         prevMove_[ply] = Move();
         for (int k = 0; k < MAX_KILLERS; ++k) {
             killers_[ply][k] = Move();
         }
     }
-    for (int color = 0; color < 2; ++color) {
-        for (int from = 0; from < BOARDWIDTH * BOARDHEIGHT; ++from) {
-            for (int to = 0; to < BOARDWIDTH * BOARDHEIGHT; ++to) {
-                counterMoves_[color][from][to] = Move();
-            }
-        }
-    }
-    timeUp_ = false;
-    nodesSearched_ = 0;
-    searchAge_ = static_cast<uint8_t>(searchAge_ + 1);
-    allocatedTimeMs_ = HARD_TIME_BASE_MS;
-    softTimeMs_ = SOFT_TIME_BASE_MS;
-    hardTimeMs_ = HARD_TIME_BASE_MS;
-    lastIterationMs_ = 0;
-    completedDepth_ = 0;
-    bestMoveChanges_ = 0;
 }
 
-// =====================================================================
-// QSearch：将军扩展与局面危险阶段挂钩
-// =====================================================================
-int AIPlayer::scoreQSearchCheckingMove(const ChessBoard& board, const Move& move,
-                                       int qsDepth, int standPat, int alpha,
-                                       int oppDangerLevel) const {
-    // 只在 qsDepth==0 且局面有一定紧张度时才展开非吃子将军步
-    // oppDangerLevel: 对方帅的danger, 越高说明局面越尖锐, 越值得搜将军
-    if (qsDepth > 0) {
-        return -INF_SCORE;
+int AIPlayer::elapsedMs() const {
+    const auto now = std::chrono::steady_clock::now();
+    return static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(now - searchStart_).count());
+}
+
+bool AIPlayer::checkTime() const {
+    if ((nodesSearched_ & TIME_CHECK_MASK) != 0) {
+        return timeUp_;
+    }
+    if (elapsedMs() >= hardTimeMs_) {
+        timeUp_ = true;
+    }
+    return timeUp_;
+}
+
+bool AIPlayer::softTimeUp() const {
+    return elapsedMs() >= softTimeMs_;
+}
+
+void AIPlayer::allocateTimeBudget(const ChessBoard&, int rootMoveCount) const {
+    int soft = SOFT_TIME_BASE_MS;
+    int hard = HARD_TIME_BASE_MS;
+
+    if (rootMoveCount <= 4) {
+        soft += 80;
+        hard += 80;
+    } else if (rootMoveCount >= 20) {
+        soft -= 40;
+        hard -= 40;
     }
 
-    // 如果对方 danger 很低（对方帅很安全），将军几乎无意义
-    if (oppDangerLevel < 30 && standPat + 120 < alpha) {
-        return -INF_SCORE;
-    }
-    if (standPat + 80 < alpha) {
-        return -INF_SCORE;
-    }
+    softTimeMs_ = std::max(SOFT_TIME_MIN_MS, std::min(SOFT_TIME_MAX_MS, soft));
+    hardTimeMs_ = std::max(HARD_TIME_MIN_MS, std::min(HARD_TIME_MAX_MS, hard));
+    allocatedTimeMs_ = hardTimeMs_;
+}
 
-    const Grid source = board.getGridAt(move.source_x, move.source_y);
-    if (source.type == King || source.type == Assistant || source.type == Bishop) {
-        return -INF_SCORE;
+bool AIPlayer::shouldStopForNextDepth(int depth, int) const {
+    if (timeUp_) return true;
+    if (elapsedMs() >= hardTimeMs_) return true;
+    if (depth <= 1) return false;
+    if (lastIterationMs_ <= 0) return false;
+    return elapsedMs() + lastIterationMs_ * 2 > hardTimeMs_;
+}
+
+int AIPlayer::drawValue(int ply) const {
+    return ((ply & 1) == 0 ? -DRAW_VALUE : DRAW_VALUE);
+}
+
+int AIPlayer::repValue(int repStatus, int ply) const {
+    if (repStatus == REP_DRAW) {
+        return drawValue(ply);
     }
-    if (!const_cast<ChessBoard&>(board).isOppKingAttackedAfterMove(move)) {
-        return -INF_SCORE;
+    if (repStatus == REP_LOSS) {
+        return ply - BAN_SCORE;
     }
-
-    int oppKingX = -1;
-    int oppKingY = -1;
-    board.findKing(board.oppColor(), oppKingX, oppKingY);
-
-    int sc = 2000 + pieceBaseValue(source.type);
-
-    // 危险程度越高，将军奖励越大
-    if (oppDangerLevel >= 60) {
-        sc += 400;
-    } else if (oppDangerLevel >= 30) {
-        sc += 150;
+    if (repStatus == REP_WIN) {
+        return BAN_SCORE - ply;
     }
+    return 0;
+}
 
-    if (oppKingX >= 0) {
-        const int dist = std::abs(move.target_x - oppKingX) + std::abs(move.target_y - oppKingY);
-        if (dist <= 3) {
-            sc += (4 - dist) * 120;
+void AIPlayer::orderMoves(const ChessBoard& board,
+                          std::vector<Move>& moves,
+                          int ply,
+                          const Move& ttMove) const {
+    auto pieceValue = [](stoneType t) -> int {
+        switch (t) {
+            case King:      return 1000;
+            case Rook:      return 500;
+            case Cannon:    return 350;
+            case Knight:    return 300;
+            case Bishop:    return 120;
+            case Assistant: return 120;
+            case Pawn:      return 100;
+            default:        return 0;
         }
+    };
+
+    const int sideIdx = (board.currentColor() == RED ? 1 : 0);
+    const int n = static_cast<int>(moves.size());
+
+    int scores[EYE_MAX_MOVES];
+    for (int i = 0; i < n; ++i) {
+        const Move& mv = moves[i];
+        int score = 0;
+
+        if (!ttMove.isInvalid() && mv == ttMove) {
+            score += 1000000000;
+        }
+
+        if (board.isCapture(mv)) {
+            const Grid src = board.getGridAt(mv.source_x, mv.source_y);
+            const Grid dst = board.getGridAt(mv.target_x, mv.target_y);
+            score += 500000;
+            score += pieceValue(dst.type) * 16 - pieceValue(src.type);
+        } else {
+            if (isKiller(ply, mv)) {
+                score += 300000;
+            }
+
+            if (ply > 0 && isCounterMove(board.currentColor(), prevMove_[ply - 1], mv)) {
+                score += 250000;
+            }
+
+            const int from = mv.source_x * BOARDHEIGHT + mv.source_y;
+            const int to   = mv.target_x * BOARDHEIGHT + mv.target_y;
+            score += history_[sideIdx][from][to];
+        }
+
+        scores[i] = score;
     }
 
-    // 抽将潜力：将军步目标位置同行/列有对方高价值子
-    if (oppKingX >= 0) {
-        const int tx = move.target_x;
-        const int ty = move.target_y;
-        if (source.type == Rook) {
-            // 车将军：看是否在将军后能抽到大子
-            if (tx == oppKingX && countPiecesBetween(board, tx, ty, oppKingX, oppKingY) == 0) {
-                for (int fx = 0; fx < BOARDWIDTH; ++fx) {
-                    if (fx == tx) continue;
-                    const Grid tg = board.getGridAt(fx, ty);
-                    if (tg.color == board.oppColor() && (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
-                        sc += 500;
-                        break;
-                    }
-                }
+    for (int i = 0; i < n; ++i) {
+        int best = i;
+        for (int j = i + 1; j < n; ++j) {
+            if (scores[j] > scores[best]) {
+                best = j;
             }
         }
+        if (best != i) {
+            std::swap(moves[i], moves[best]);
+            std::swap(scores[i], scores[best]);
+        }
+    }
+}
+void AIPlayer::orderMoveArray(const ChessBoard& board,
+                              Move moves[],
+                              int count,
+                              int ply,
+                              const Move& ttMove) const {
+    auto pieceValue = [](stoneType t) -> int {
+        switch (t) {
+            case King:      return 1000;
+            case Rook:      return 500;
+            case Cannon:    return 350;
+            case Knight:    return 300;
+            case Bishop:    return 120;
+            case Assistant: return 120;
+            case Pawn:      return 100;
+            default:        return 0;
+        }
+    };
+
+    const int sideIdx = (board.currentColor() == RED ? 1 : 0);
+    int scores[EYE_MAX_MOVES];
+
+    for (int i = 0; i < count; ++i) {
+        const Move& mv = moves[i];
+        int score = 0;
+
+        if (!ttMove.isInvalid() && mv == ttMove) {
+            score += 1000000000;
+        }
+
+        if (board.isCapture(mv)) {
+            const Grid src = board.getGridAt(mv.source_x, mv.source_y);
+            const Grid dst = board.getGridAt(mv.target_x, mv.target_y);
+            score += 500000;
+            score += pieceValue(dst.type) * 16 - pieceValue(src.type);
+        } else {
+            if (isKiller(ply, mv)) {
+                score += 300000;
+            }
+
+            if (ply > 0 && isCounterMove(board.currentColor(), prevMove_[ply - 1], mv)) {
+                score += 250000;
+            }
+
+            const int from = mv.source_x * BOARDHEIGHT + mv.source_y;
+            const int to   = mv.target_x * BOARDHEIGHT + mv.target_y;
+            score += history_[sideIdx][from][to];
+        }
+
+        scores[i] = score;
     }
 
-    const int pstDiff = positionValue(source.type, source.color, move.target_x, move.target_y)
-                      - positionValue(source.type, source.color, move.source_x, move.source_y);
-    sc += pstDiff * 3;
-    return sc;
+    for (int i = 0; i < count; ++i) {
+        int best = i;
+        for (int j = i + 1; j < count; ++j) {
+            if (scores[j] > scores[best]) {
+                best = j;
+            }
+        }
+        if (best != i) {
+            std::swap(moves[i], moves[best]);
+            std::swap(scores[i], scores[best]);
+        }
+    }
+}
+void AIPlayer::orderRootMoves(const ChessBoard&,
+                              std::vector<RootMoveInfo>& moves,
+                              const Move& pvMove) const {
+    auto rootScore = [&](const RootMoveInfo& rm) -> int {
+        int sc = 0;
+
+        if (!pvMove.isInvalid() && rm.move == pvMove) {
+            sc += 1000000000;
+        }
+
+        sc += rm.searchedDepth * 1000000;
+        sc += rm.lastScore;
+        sc -= rm.rootOrder;
+
+        return sc;
+    };
+
+    for (size_t i = 0; i < moves.size(); ++i) {
+        size_t best = i;
+        int bestScore = rootScore(moves[i]);
+
+        for (size_t j = i + 1; j < moves.size(); ++j) {
+            const int sc = rootScore(moves[j]);
+            if (sc > bestScore) {
+                bestScore = sc;
+                best = j;
+            }
+        }
+
+        if (best != i) {
+            std::swap(moves[i], moves[best]);
+        }
+    }
+}
+
+void AIPlayer::updateRootOrder(std::vector<RootMoveInfo>& moves,
+                               const Move& bestMove) const {
+    for (auto& rm : moves) {
+        if (rm.move == bestMove) {
+            rm.rootOrder = 0;
+        } else if (rm.rootOrder < 1000000) {
+            ++rm.rootOrder;
+        }
+    }
+}
+
+int AIPlayer::harmlessPruning(const ChessBoard& board, int beta, int ply) const {
+    const int matePrune = ply - MATE_SCORE;
+    if (matePrune >= beta) {
+        return matePrune;
+    }
+
+    const int rep = board.repStatus();
+    if (rep != REP_NONE) {
+        return board.repValue(rep);
+    }
+
+    if (board.exceedMaxPeaceState()) {
+        return board.drawValue();
+    }
+
+    return -MATE_SCORE;
 }
 
 int AIPlayer::quiescence(ChessBoard& board, int alpha, int beta,
                          int ply, int qsDepth) const {
     ++nodesSearched_;
-    if (checkTime()) {
+
+    if ((nodesSearched_ & TIME_CHECK_MASK) == 0 && checkTime()) {
         return 0;
     }
 
-    const int standPat = evaluate(board);
-    if (standPat >= beta) {
-        return beta;
-    }
-    if (qsDepth >= MAX_QS_DEPTH) {
-        return std::max(alpha, standPat);
-    }
-    if (standPat > alpha) {
-        alpha = standPat;
+    const int harmless = harmlessPruning(board, beta, ply);
+    if (harmless > -MATE_SCORE) {
+        return harmless;
     }
 
     const bool inCheck = board.isInCheck();
-    std::vector<Move> moves;
-    if (inCheck) {
-        board.generateMoves(moves);
-    } else {
-        board.generateCaptures(moves);
 
-        // 只在 qsDepth==0 时考虑非吃子将军步，且受局面危险控制
-        if (qsDepth == 0 && standPat + 96 >= alpha) {
-            // 计算对方帅危险等级，控制将军展开的积极程度
-            const KingDangerInfo oppDanger = analyzeKingDanger(board, board.oppColor());
-            const int oppDangerLevel = oppDanger.totalDanger;
-
-            // 对方深入我方的大子数
-            const int enemyDeep = countEnemyDeepMajors(board, board.currentColor());
-
-            // 当对方帅不太危险且敌方没有大举深入时，大幅限制将军步
-            int maxChecks = MAX_QS_CHECKS;
-            if (oppDangerLevel < 20 && enemyDeep == 0) {
-                maxChecks = 1; // 极安全：几乎不展开将军步
-            } else if (oppDangerLevel < 30 && enemyDeep < 2) {
-                maxChecks = 2; // 低危险：最多只考虑2个最佳将军步
-            } else if (oppDangerLevel < 60) {
-                maxChecks = 3;
+    if (qsDepth >= MAX_QS_DEPTH || ply >= MAX_DEPTH - 1) {
+        if (inCheck) {
+            Move legalMoves[EYE_MAX_MOVES];
+            if (board.generateMovesFast(legalMoves, false) == 0) {
+                return -MATE_SCORE + ply;
             }
+        }
+        return evaluate(board, alpha, beta);
+    }
 
-            std::vector<Move> allMoves;
-            board.generateMoves(allMoves);
-            std::vector<std::pair<int, Move>> checkingMoves;
-            checkingMoves.reserve(allMoves.size());
-            for (const auto& mv : allMoves) {
-                if (board.isCapture(mv)) {
-                    continue;
-                }
-                const int sc = scoreQSearchCheckingMove(board, mv, qsDepth, standPat, alpha, oppDangerLevel);
-                if (sc > 0) {
-                    checkingMoves.push_back(std::make_pair(sc, mv));
-                }
-            }
-            std::sort(checkingMoves.begin(), checkingMoves.end(), [](const auto& lhs, const auto& rhs) {
-                return lhs.first > rhs.first;
-            });
-            int added = 0;
-            for (const auto& item : checkingMoves) {
-                moves.push_back(item.second);
-                if (++added >= maxChecks) {
-                    break;
-                }
-            }
+    int best = -MATE_SCORE;
+
+    if (!inCheck) {
+        const int standPat = evaluate(board, alpha, beta);
+        if (standPat >= beta) {
+            return standPat;
+        }
+        best = standPat;
+        if (standPat > alpha) {
+            alpha = standPat;
         }
     }
 
-    // QSearch 排序
-    std::sort(moves.begin(), moves.end(), [&](const Move& lhs, const Move& rhs) {
-        int leftScore = 0;
-        int rightScore = 0;
+    Move moves[EYE_MAX_MOVES];
+    const int moveCount = inCheck
+        ? board.generateMovesFast(moves, false)
+        : board.generateCapturesFast(moves, false);
 
-        const Grid leftTarget = board.getGridAt(lhs.target_x, lhs.target_y);
-        const Grid leftSource = board.getGridAt(lhs.source_x, lhs.source_y);
-        if (leftTarget.color != EMPTY) {
-            leftScore = 2000 + pieceBaseValue(leftTarget.type) * 10 - pieceBaseValue(leftSource.type);
-        } else {
-            leftScore = 1000; // 将军步已排序后加入
-        }
+    if (inCheck && moveCount == 0) {
+        return -MATE_SCORE + ply;
+    }
 
-        const Grid rightTarget = board.getGridAt(rhs.target_x, rhs.target_y);
-        const Grid rightSource = board.getGridAt(rhs.source_x, rhs.source_y);
-        if (rightTarget.color != EMPTY) {
-            rightScore = 2000 + pieceBaseValue(rightTarget.type) * 10 - pieceBaseValue(rightSource.type);
-        } else {
-            rightScore = 1000;
-        }
+    orderMoveArray(board, moves, moveCount, ply, Move());
 
-        return leftScore > rightScore;
-    });
+    for (int i = 0; i < moveCount; ++i) {
+        const Move& mv = moves[i];
 
-    for (const auto& mv : moves) {
-        const Grid captured = board.getGridAt(mv.target_x, mv.target_y);
-        if (!inCheck && captured.color != EMPTY && standPat + pieceBaseValue(captured.type) + 180 < alpha) {
+        if (!board.makeMoveFast(mv)) {
             continue;
         }
 
-        board.makeMoveAssumeLegal(mv);
+        const colorType movedSide = board.oppColor();
+        if (board.kingAttacked(movedSide)) {
+            board.undoMoveFast();
+            continue;
+        }
+
+        prevMove_[ply] = mv;
         const int sc = -quiescence(board, -beta, -alpha, ply + 1, qsDepth + 1);
-        board.undoMove();
+        board.undoMoveFast();
 
         if (timeUp_) {
             return 0;
         }
-        if (sc >= beta) {
-            return beta;
-        }
-        if (sc > alpha) {
-            alpha = sc;
+
+        if (sc > best) {
+            best = sc;
+            if (sc >= beta) {
+                return sc;
+            }
+            if (sc > alpha) {
+                alpha = sc;
+            }
         }
     }
 
-    return alpha;
+    if (best == -MATE_SCORE) {
+        return -MATE_SCORE + ply;
+    }
+    return best;
 }
+int AIPlayer::searchCut(ChessBoard& board, int beta, int depth,
+                        int ply, bool noNull) const {
+    if (depth <= 0) {
+        return quiescence(board, beta - 1, beta, ply, 0);
+    }
 
-// =====================================================================
-// Alpha-Beta / PVS / TT / Null Move / LMR
-// =====================================================================
-int AIPlayer::alphaBeta(ChessBoard& board, int depth, int alpha, int beta,
-                        int ply, bool allowNull, bool cutNode) const {
     ++nodesSearched_;
-    if (checkTime()) {
+    if ((nodesSearched_ & TIME_CHECK_MASK) == 0 && checkTime()) {
         return 0;
     }
-    if (ply >= MAX_DEPTH - 1) {
-        return evaluate(board);
-    }
-    if (board.exceedMaxPeaceState()) {
-        return DRAW_SCORE;
+
+    const int harmless = harmlessPruning(board, beta, ply);
+    if (harmless > -MATE_SCORE) {
+        return harmless;
     }
 
-    const bool pvNode = (beta - alpha > 1);
-    const bool inCheck = board.isInCheck();
-    if (inCheck) {
-        ++depth;
+    if (ply >= MAX_DEPTH - 1) {
+        return evaluate(board, beta - 1, beta);
     }
+
+    const bool inCheck = board.isInCheck();
+    const bool nodeInCheck = inCheck;
+    const colorType sideToMove = board.currentColor();
+
+    Move ttMove;
+    {
+        const int probe = ttProbe(board, beta - 1, beta, depth, true, ttMove);
+        if (probe > -MATE_SCORE) {
+            return probe;
+        }
+    }
+
+    if (!noNull && !inCheck && board.nullOkay() && depth > NULL_DEPTH + 1) {
+        board.makeNullMoveFast();
+        const int nullScore =
+            -searchCut(board, 1 - beta, depth - NULL_DEPTH - 1, ply + 1, true);
+        board.undoNullMoveFast();
+
+        if (timeUp_) {
+            return 0;
+        }
+
+        if (nullScore >= beta) {
+            if (board.nullSafe()) {
+                ttStore(board, HASH_BETA, nullScore,
+                        std::max(depth, NULL_DEPTH + 1), Move());
+                return nullScore;
+            }
+
+            const int verify =
+                searchCut(board, beta, depth - NULL_DEPTH, ply, true);
+
+            if (verify >= beta) {
+                ttStore(board, HASH_BETA, verify,
+                        std::max(depth, NULL_DEPTH), Move());
+                return verify;
+            }
+        }
+    }
+
+    auto goodCapture = [&](const Move& mv) -> bool {
+        return board.isCapture(mv);
+    };
+
+    Move moves[EYE_MAX_MOVES];
+    const int moveCount = board.generateMovesFast(moves, false);
+    if (moveCount == 0) {
+        return -MATE_SCORE + ply;
+    }
+
+    orderMoveArray(board, moves, moveCount, ply, ttMove);
+
+    int best = -MATE_SCORE;
+    Move bestMove;
+
+    for (int i = 0; i < moveCount; ++i) {
+        const Move& mv = moves[i];
+
+        if (!board.makeMoveFast(mv)) {
+            continue;
+        }
+
+        const colorType movedSide = board.oppColor();
+        if (board.kingAttacked(movedSide)) {
+            board.undoMoveFast();
+            continue;
+        }
+
+        prevMove_[ply] = mv;
+        const bool givesCheck = board.isInCheck();
+        const int newDepth = (givesCheck || nodeInCheck ? depth : depth - 1);
+        const int sc = -searchCut(board, 1 - beta, newDepth, ply + 1, false);
+        board.undoMoveFast();
+
+        if (timeUp_) {
+            return 0;
+        }
+
+        if (sc > best) {
+            best = sc;
+            bestMove = mv;
+
+            if (sc >= beta) {
+                ttStore(board, HASH_BETA, sc, depth, mv);
+
+                if (!goodCapture(mv)) {
+                    updateKiller(ply, mv);
+                    updateHistory(sideToMove, mv, depth);
+                    if (ply > 0) {
+                        updateCounterMove(sideToMove, prevMove_[ply - 1], mv);
+                    }
+                }
+                return sc;
+            }
+        }
+    }
+
+    if (best == -MATE_SCORE) {
+        return -MATE_SCORE + ply;
+    }
+
+    ttStore(board, HASH_ALPHA, best, depth, bestMove);
+    return best;
+}
+int AIPlayer::searchPV(ChessBoard& board, int alpha, int beta, int depth,
+                       int ply, std::vector<Move>& pvLine) const {
+    Move pvBuf[MAX_DEPTH];
+    int pvLen = 0;
+
+    const int sc = searchPVFast(board, alpha, beta, depth, ply, pvBuf, pvLen);
+
+    pvLine.clear();
+    for (int i = 0; i < pvLen; ++i) {
+        pvLine.push_back(pvBuf[i]);
+    }
+    return sc;
+}
+int AIPlayer::searchPVFast(ChessBoard& board, int alpha, int beta, int depth,
+                           int ply, Move pvBuf[], int& pvLen) const {
+    pvLen = 0;
+
     if (depth <= 0) {
         return quiescence(board, alpha, beta, ply, 0);
     }
 
-    const int originalAlpha = alpha;
-    const uint64_t key = board.computeHash();
-    int ttScore = 0;
+    ++nodesSearched_;
+    if ((nodesSearched_ & TIME_CHECK_MASK) == 0 && checkTime()) {
+        return 0;
+    }
+
+    const int harmless = harmlessPruning(board, beta, ply);
+    if (harmless > -MATE_SCORE) {
+        return harmless;
+    }
+
+    if (ply >= MAX_DEPTH - 1) {
+        return evaluate(board, alpha, beta);
+    }
+
+    const int alphaOrig = alpha;
+    const bool inCheck = board.isInCheck();
+    const bool nodeInCheck = inCheck;
+    const colorType sideToMove = board.currentColor();
+
     Move ttMove;
-    if (ttProbe(key, depth, alpha, beta, ttScore, ttMove, ply)) {
-        if (!pvNode) {
-            return ttScore;
+    {
+        const int probe = ttProbe(board, alpha, beta, depth, true, ttMove);
+        if (probe > -MATE_SCORE) {
+            return probe;
         }
     }
 
-    if (pvNode && ttMove.isInvalid() && depth >= 5) {
-        alphaBeta(board, depth - 2, alpha, beta, ply, true, false);
-        ttProbe(key, 0, -INF_SCORE, INF_SCORE, ttScore, ttMove, ply);
-    }
-
-    if (!pvNode && !inCheck && depth <= 2 && ttMove.isInvalid()) {
-        const int eval = evaluate(board);
-        const int margin = RAZOR_MARGIN + (depth - 1) * 120;
-        if (eval + margin <= alpha) {
-            const int qScore = quiescence(board, alpha, beta, ply, 0);
-            if (qScore <= alpha) {
-                return qScore;
-            }
+    if (depth > 2 && ttMove.isInvalid()) {
+        Move iidBuf[MAX_DEPTH];
+        int iidLen = 0;
+        (void)searchPVFast(board, alpha, beta, depth / 2, ply, iidBuf, iidLen);
+        if (iidLen > 0) {
+            ttMove = iidBuf[0];
         }
-    }
-
-    if (allowNull && !pvNode && !inCheck &&
-        depth >= NULL_MOVE_MIN_DEPTH &&
-        board.countMajorPieces(board.currentColor()) >= 4) {
-        int reduction = 2 + (depth >= 6 ? 1 : 0) + (depth >= 10 ? 1 : 0);
-        if (reduction > depth - 1) {
-            reduction = depth - 1;
-        }
-        board.makeNullMove();
-        const int nullScore = -alphaBeta(board, depth - 1 - reduction, -beta, -beta + 1,
-                                         ply + 1, false, !cutNode);
-        board.undoNullMove();
         if (timeUp_) {
             return 0;
         }
-        if (nullScore >= beta) {
-            if (depth >= 8) {
-                const int verify = alphaBeta(board, depth - 1 - reduction, alpha, beta, ply, false, false);
-                if (verify >= beta) {
-                    return beta;
-                }
-            } else {
-                return beta;
-            }
-        }
     }
 
-    std::vector<Move> moves;
-    board.generateMoves(moves);
-    if (moves.empty()) {
+    auto goodCapture = [&](const Move& mv) -> bool {
+        return board.isCapture(mv);
+    };
+
+    Move moves[EYE_MAX_MOVES];
+    const int moveCount = board.generateMovesFast(moves, false);
+    if (moveCount == 0) {
         return -MATE_SCORE + ply;
     }
-    orderMoves(board, moves, ply, ttMove);
 
-    bool canFutility = !pvNode && !inCheck && depth <= 2;
-    int futilityBase = 0;
-    if (canFutility) {
-        futilityBase = evaluate(board);
-        const int margins[3] = {0, FUTILITY_MARGIN_1, FUTILITY_MARGIN_2};
-        if (futilityBase + margins[depth] > alpha) {
-            canFutility = false;
-        }
-    }
+    orderMoveArray(board, moves, moveCount, ply, ttMove);
 
+    int best = -MATE_SCORE;
     Move bestMove;
-    int bestScore = -INF_SCORE;
-    int movesSearched = 0;
+    bool firstLegalMove = true;
 
-    for (const auto& mv : moves) {
-        if (checkTime()) {
-            break;
-        }
+    for (int i = 0; i < moveCount; ++i) {
+        const Move& mv = moves[i];
 
-        const bool isCapture = board.isCapture(mv);
-        const Grid source = board.getGridAt(mv.source_x, mv.source_y);
-        if (canFutility && movesSearched > 2 && !isCapture &&
-            source.type != King && source.type != Assistant && source.type != Bishop &&
-            !isKiller(ply, mv)) {
+        if (!board.makeMoveFast(mv)) {
             continue;
         }
 
-        board.makeMoveAssumeLegal(mv);
+        const colorType movedSide = board.oppColor();
+        if (board.kingAttacked(movedSide)) {
+            board.undoMoveFast();
+            continue;
+        }
+
         prevMove_[ply] = mv;
         const bool givesCheck = board.isInCheck();
-        int sc = 0;
+        const int newDepth = (givesCheck || nodeInCheck ? depth : depth - 1);
 
-        if (movesSearched == 0) {
-            sc = -alphaBeta(board, depth - 1, -beta, -alpha, ply + 1, true, false);
+        Move childBuf[MAX_DEPTH];
+        int childLen = 0;
+        int sc;
+
+        if (firstLegalMove) {
+            sc = -searchPVFast(board, -beta, -alpha, newDepth, ply + 1, childBuf, childLen);
+            firstLegalMove = false;
         } else {
-            int newDepth = depth - 1;
-            if (!inCheck && !isCapture && !givesCheck &&
-                depth >= LMR_MIN_DEPTH && movesSearched >= LMR_MIN_MOVES) {
-                int reduction = lmrTable[std::min(depth, 63)][std::min(movesSearched, 63)];
-                if (cutNode) {
-                    ++reduction;
-                }
-                if (pvNode) {
-                    reduction = std::max(0, reduction - 1);
-                }
-                if (source.type == King || source.type == Assistant || source.type == Bishop) {
-                    reduction = std::max(0, reduction - 1);
-                }
-                newDepth = std::max(1, depth - 1 - reduction);
-            }
-            sc = -alphaBeta(board, newDepth, -(alpha + 1), -alpha, ply + 1, true, !cutNode);
-            if (sc > alpha && (newDepth < depth - 1 || !pvNode)) {
-                sc = -alphaBeta(board, depth - 1, -beta, -alpha, ply + 1, true, false);
+            sc = -searchCut(board, -alpha, newDepth, ply + 1, false);
+            if (!timeUp_ && sc > alpha && sc < beta) {
+                childLen = 0;
+                sc = -searchPVFast(board, -beta, -alpha, newDepth, ply + 1, childBuf, childLen);
             }
         }
 
-        board.undoMove();
-        ++movesSearched;
+        board.undoMoveFast();
 
         if (timeUp_) {
-            break;
+            return 0;
         }
-        if (sc > bestScore) {
-            bestScore = sc;
+
+        if (sc > best) {
+            best = sc;
             bestMove = mv;
-        }
-        if (sc > alpha) {
-            alpha = sc;
-        }
-        if (alpha >= beta) {
-            if (!isCapture) {
-                updateKiller(ply, mv);
-                updateHistory(board.currentColor(), mv, depth);
-                if (ply > 0) {
-                    updateCounterMove(board.currentColor(), prevMove_[ply - 1], mv);
+
+            if (sc > alpha) {
+                alpha = sc;
+
+                pvLen = 0;
+                if (pvLen < MAX_DEPTH) {
+                    pvBuf[pvLen++] = mv;
+                }
+                for (int k = 0; k < childLen && pvLen < MAX_DEPTH; ++k) {
+                    pvBuf[pvLen++] = childBuf[k];
+                }
+
+                if (sc >= beta) {
+                    ttStore(board, HASH_BETA, sc, depth, mv);
+
+                    if (!goodCapture(mv)) {
+                        updateKiller(ply, mv);
+                        updateHistory(sideToMove, mv, depth);
+                        if (ply > 0) {
+                            updateCounterMove(sideToMove, prevMove_[ply - 1], mv);
+                        }
+                    }
+                    return sc;
                 }
             }
-            break;
         }
     }
 
-    if (movesSearched == 0) {
-        return originalAlpha;
+    if (best == -MATE_SCORE) {
+        return -MATE_SCORE + ply;
     }
 
-    if (!timeUp_ && !bestMove.isInvalid()) {
-        TTFlag flag = TT_UPPERBOUND;
-        if (bestScore >= beta) {
-            flag = TT_LOWERBOUND;
-        } else if (bestScore > originalAlpha) {
-            flag = TT_EXACT;
-        }
-        ttStore(key, depth, bestScore, flag, bestMove, ply);
+    if (best > alphaOrig) {
+        ttStore(board, HASH_PV, best, depth, bestMove);
+    } else {
+        ttStore(board, HASH_ALPHA, best, depth, bestMove);
     }
-    return bestScore;
+    return best;
+}
+bool AIPlayer::searchUnique(ChessBoard& board,
+                            const std::vector<RootMoveInfo>& rootMoves,
+                            const Move& bestMove,
+                            int beta,
+                            int depth) const {
+    for (const auto& root : rootMoves) {
+        if (root.move == bestMove) {
+            continue;
+        }
+
+        if (!board.makeMoveFast(root.move)) {
+            continue;
+        }
+
+        const colorType movedSide = board.oppColor();
+        if (board.kingAttacked(movedSide)) {
+            board.undoMoveFast();
+            continue;
+        }
+
+        prevMove_[0] = root.move;
+
+        const bool givesCheck = board.isInCheck();
+        const int newDepth = (givesCheck ? depth : depth - 1);
+
+        const int sc = -searchCut(board, 1 - beta, newDepth, 1, false);
+
+        board.undoMoveFast();
+
+        if (timeUp_) {
+            return false;
+        }
+
+        if (sc >= beta) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
-// =====================================================================
-// 迭代加深 + 根节点 PVS + 受限 aspiration
-// =====================================================================
 Move AIPlayer::getBestMove(ChessBoard& board) const {
     initSearchState();
     searchStart_ = std::chrono::steady_clock::now();
 
-    std::vector<Move> rootLegalMoves;
-    board.generateMovesWithForbidden(rootLegalMoves);
-    const bool allForbidden = rootLegalMoves.empty();
-    if (allForbidden) {
-        board.generateMoves(rootLegalMoves);
-        if (rootLegalMoves.empty()) {
-            return Move();
-        }
+    std::vector<Move> legalMoves;
+    board.generateMovesWithForbidden(legalMoves);
+
+    if (legalMoves.empty()) {
+        board.generateMoves(legalMoves);
     }
-    if (rootLegalMoves.size() == 1) {
-        return rootLegalMoves[0];
+    if (legalMoves.empty()) {
+        return Move();
     }
 
-    const Move openingMove = OpeningBook::chooseOpeningMove(board, rootLegalMoves);
-    if (!openingMove.isInvalid()) {
-        return openingMove;
-    }
-
-    allocateTimeBudget(board, static_cast<int>(rootLegalMoves.size()));
-
-    int oppKingX = -1;
-    int oppKingY = -1;
-    board.findKing(board.oppColor(), oppKingX, oppKingY);
-    const int phase = endgamePhase(board);
-    const bool rootInCheck = board.isInCheck();
-    const int currentDanger = analyzeKingDanger(board, board.currentColor()).totalDanger;
+    allocateTimeBudget(board, static_cast<int>(legalMoves.size()));
 
     std::vector<RootMoveInfo> rootMoves;
-    rootMoves.reserve(rootLegalMoves.size());
-    for (const auto& mv : rootLegalMoves) {
+    rootMoves.reserve(legalMoves.size());
+    for (size_t i = 0; i < legalMoves.size(); ++i) {
         RootMoveInfo info;
-        info.move = mv;
-        info.staticScore = scoreMoveForOrdering(board, mv, 0, Move(), oppKingX, oppKingY, phase, rootInCheck);
+        info.move = legalMoves[i];
+        info.lastScore = -INF_SCORE;
+        info.searchedDepth = 0;
+        info.rootOrder = static_cast<int>(i) + 1;
         rootMoves.push_back(info);
     }
-    orderRootMoves(board, rootMoves, Move(), currentDanger);
 
-    Move bestMove = rootMoves[0].move;
-    Move pvMove = bestMove;
-    int previousScore = 0;
-    int previousElapsed = 0;
+    Move bestMove = legalMoves.front();
+    int bestScore = -INF_SCORE;
 
     for (int depth = 1; depth <= DEFAULT_DEPTH; ++depth) {
-        if (depth > 1 && shouldStopForNextDepth(depth, static_cast<int>(rootMoves.size()))) {
+        if (shouldStopForNextDepth(depth, static_cast<int>(rootMoves.size()))) {
             break;
         }
 
-        orderRootMoves(board, rootMoves, pvMove, currentDanger);
+        orderRootMoves(board, rootMoves, bestMove);
 
-        int aspiration = ASP_WINDOW;
-        int windowAlpha = (depth >= 4) ? (previousScore - aspiration) : -INF_SCORE;
-        int windowBeta = (depth >= 4) ? (previousScore + aspiration) : INF_SCORE;
+        int alpha = -INF_SCORE;
+        int beta  = INF_SCORE;
 
-        Move depthBest;
-        int depthScore = -INF_SCORE;
-        bool depthComplete = false;
-        bool usedFullWindow = depth < 4;
-        int researchCount = 0;
+        Move iterBestMove = bestMove;
+        int iterBestScore = -INF_SCORE;
 
-        while (true) {
+        for (auto& rm : rootMoves) {
             if (checkTime()) {
+                timeUp_ = true;
                 break;
             }
 
-            int localAlpha = windowAlpha;
-            depthBest = Move();
-            depthScore = -INF_SCORE;
-            int searchedMoves = 0;
-
-            for (auto& root : rootMoves) {
-                if (checkTime()) {
-                    break;
-                }
-
-                board.makeMoveAssumeLegal(root.move);
-                int sc = 0;
-                if (searchedMoves == 0) {
-                    sc = -alphaBeta(board, depth - 1, -windowBeta, -localAlpha, 1, true, false);
-                } else {
-                    sc = -alphaBeta(board, depth - 1, -(localAlpha + 1), -localAlpha, 1, true, true);
-                    if (sc > localAlpha && sc < windowBeta) {
-                        sc = -alphaBeta(board, depth - 1, -windowBeta, -localAlpha, 1, true, false);
-                    }
-                }
-                board.undoMove();
-                ++searchedMoves;
-
-                if (timeUp_) {
-                    break;
-                }
-
-                root.lastScore = sc;
-                root.searchedDepth = depth;
-                if (sc > depthScore) {
-                    depthScore = sc;
-                    depthBest = root.move;
-                }
-                if (sc > localAlpha) {
-                    localAlpha = sc;
-                }
-                if (localAlpha >= windowBeta) {
-                    break;
-                }
-            }
-
-            if (timeUp_ || depthBest.isInvalid()) {
-                break;
-            }
-            if (depth < 4) {
-                depthComplete = true;
-                break;
-            }
-
-            if (depthScore <= windowAlpha) {
-                ++researchCount;
-                if (researchCount >= MAX_ASP_RESEARCH || softTimeUp()) {
-                    if (!usedFullWindow) {
-                        windowAlpha = -INF_SCORE;
-                        windowBeta = INF_SCORE;
-                        usedFullWindow = true;
-                        researchCount = 0;
-                        continue;
-                    }
-                    break;
-                }
-                aspiration = std::min(aspiration * 2 + 16, 320);
-                windowAlpha = previousScore - aspiration;
-                if (aspiration >= 320) {
-                    windowAlpha = -INF_SCORE;
-                    windowBeta = INF_SCORE;
-                    usedFullWindow = true;
-                }
+            if (!board.makeMoveFast(rm.move)) {
                 continue;
             }
 
-            if (depthScore >= windowBeta) {
-                ++researchCount;
-                if (researchCount >= MAX_ASP_RESEARCH || softTimeUp()) {
-                    if (!usedFullWindow) {
-                        windowAlpha = -INF_SCORE;
-                        windowBeta = INF_SCORE;
-                        usedFullWindow = true;
-                        researchCount = 0;
-                        continue;
-                    }
-                    break;
-                }
-                aspiration = std::min(aspiration * 2 + 16, 320);
-                windowBeta = previousScore + aspiration;
-                if (aspiration >= 320) {
-                    windowAlpha = -INF_SCORE;
-                    windowBeta = INF_SCORE;
-                    usedFullWindow = true;
-                }
+            const colorType movedSide = board.oppColor();
+            if (board.kingAttacked(movedSide)) {
+                board.undoMoveFast();
                 continue;
             }
 
-            depthComplete = true;
+            Move childBuf[MAX_DEPTH];
+            int childLen = 0;
+            const int sc = -searchPVFast(board, -beta, -alpha, depth - 1, 1, childBuf, childLen);
+            board.undoMoveFast();
+
+            if (timeUp_) {
+                break;
+            }
+
+            rm.lastScore = sc;
+            rm.searchedDepth = depth;
+
+            if (sc > iterBestScore) {
+                iterBestScore = sc;
+                iterBestMove = rm.move;
+            }
+
+            if (sc > alpha) {
+                alpha = sc;
+            }
+        }
+
+        if (timeUp_) {
             break;
         }
 
-        if (!depthComplete) {
-            break;
-        }
+        bestMove = iterBestMove;
+        bestScore = iterBestScore;
+        updateRootOrder(rootMoves, bestMove);
 
-        if (!(depthBest == bestMove)) {
-            ++bestMoveChanges_;
-        }
-        bestMove = depthBest;
-        pvMove = depthBest;
-        previousScore = depthScore;
         completedDepth_ = depth;
-        orderRootMoves(board, rootMoves, pvMove, currentDanger);
+        lastIterationMs_ = elapsedMs();
 
-        const int now = elapsedMs();
-        lastIterationMs_ = std::max(1, now - previousElapsed);
-        previousElapsed = now;
-
+        if (std::abs(bestScore) >= WIN_SCORE) {
+            break;
+        }
         if (softTimeUp()) {
             break;
-        }
-    }
-
-    bool found = false;
-    for (const auto& root : rootMoves) {
-        if (root.move == bestMove) {
-            found = true;
-            break;
-        }
-    }
-    if (!found) {
-        bestMove = rootMoves[0].move;
-    }
-
-    if (!allForbidden && board.repeatAfterMove(bestMove)) {
-        for (const auto& root : rootMoves) {
-            if (!board.repeatAfterMove(root.move)) {
-                bestMove = root.move;
-                break;
-            }
         }
     }
 

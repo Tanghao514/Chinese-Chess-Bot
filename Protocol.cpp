@@ -1,5 +1,4 @@
 #include "Protocol.h"
-
 bool Protocol::parseMoveObject(const Json::Value& value, ProtocolMoveEntry& entry) {
     entry.valid = false;
     entry.move = Move();

@@ -3,23 +3,25 @@ import re
 
 OUTPUT_FILE = "bot.cpp"
 
-# 头文件先放前面，源文件后放后面
-# 新增的 OpeningBook / TacticalRules 已加入
+# 头文件先，源文件后
 FILES = [
     "Common.h",
     "ChessBoard.h",
-    "TacticalRules.h",
-    "OpeningBook.h",
+    "MoveBook.h",
     "AIPlayer.h",
     "Protocol.h",
 
     "ChessBoard.cpp",
-    "TacticalRules.cpp",
-    "OpeningBook.cpp",
+    "MoveBook.cpp",
     "AIPlayer.cpp",
     "Protocol.cpp",
     "main.cpp",
 ]
+
+# 自动从 FILES 中提取项目内部头文件，避免以后新增头文件忘记更新
+INTERNAL_HEADERS = {
+    path for path in FILES if path.endswith(".h")
+}
 
 
 def file_exists(path: str) -> bool:
@@ -34,14 +36,17 @@ def read_text(path: str) -> str:
 def strip_include_guards(text: str) -> str:
     lines = text.splitlines()
 
-    # 去掉开头的 #ifndef / #define
+    # 去掉传统 include guard:
+    # #ifndef XXX
+    # #define XXX
     if len(lines) >= 2 and lines[0].startswith("#ifndef") and lines[1].startswith("#define"):
         lines = lines[2:]
 
-    # 去掉末尾的 #endif（通常是 include guard 的结尾）
+    # 去掉末尾空行
     while lines and lines[-1].strip() == "":
         lines.pop()
 
+    # 去掉末尾 #endif
     if lines and lines[-1].strip().startswith("#endif"):
         lines.pop()
 
@@ -53,27 +58,18 @@ def strip_local_includes(text: str) -> str:
     去掉项目内部头文件引用，例如:
     #include "Common.h"
     #include "ChessBoard.h"
+    #include "MoveBook.h"
     #include "AIPlayer.h"
-    #include "OpeningBook.h"
-    #include "TacticalRules.h"
     #include "Protocol.h"
-    保留系统头文件和 json 相关 include。
-    """
-    internal_headers = {
-        "Common.h",
-        "ChessBoard.h",
-        "AIPlayer.h",
-        "Protocol.h",
-        "OpeningBook.h",
-        "TacticalRules.h",
-    }
 
+    保留系统头文件、第三方库头文件等。
+    """
     new_lines = []
     for line in text.splitlines():
         m = re.match(r'^\s*#include\s+"([^"]+)"', line)
         if m:
             header = m.group(1)
-            if header in internal_headers:
+            if header in INTERNAL_HEADERS:
                 continue
         new_lines.append(line)
 
@@ -81,9 +77,8 @@ def strip_local_includes(text: str) -> str:
 
 
 def normalize_blank_lines(text: str) -> str:
-    # 把连续 3 个以上空行压成 2 个
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text
+    # 连续 3 个及以上空行压成 2 个
+    return re.sub(r"\n{3,}", "\n\n", text)
 
 
 def process_file(path: str) -> str:
@@ -117,8 +112,7 @@ def main():
             merged_parts.append("\n")
             merged_count += 1
         else:
-            # 这两个 cpp 允许不存在
-            if path not in {"OpeningBook.cpp", "TacticalRules.cpp"}:
+            if path not in OPTIONAL_SOURCES:
                 missing_required.append(path)
 
     if missing_required:
