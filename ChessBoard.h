@@ -43,10 +43,11 @@ private:
 
     // Zobrist 哈希相关 (legacy 64-bit)
     static bool zobristInited_;
-    static uint64_t zobristTable_[BOARDWIDTH][BOARDHEIGHT][8][3]; // [x][y][pieceType][color]
-    static uint64_t zobristSide_; // 走棋方哈希
+    static uint64_t zobristTable_[BOARDWIDTH][BOARDHEIGHT][8][3];
+    static uint64_t zobristSide_;
     static void initZobrist();
 
+<<<<<<< HEAD
     // 从头计算 hash（仅用于初始化）
     uint64_t fullComputeHash() const;
 
@@ -84,6 +85,11 @@ private:
 
     // Sync board_[][] from Eye dual tables (debug/init only)
     void syncBoardFromEye();
+=======
+    // 增量哈希
+    uint64_t currentHash_;
+    std::vector<uint64_t> hashHistory_;
+>>>>>>> e245d4fd2f2e841ccd464b6021883e39622670c6
 
 public:
     ChessBoard();

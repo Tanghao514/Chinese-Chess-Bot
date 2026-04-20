@@ -18,6 +18,7 @@ inline int clampInt(int value, int low, int high) { return std::max(low, std::mi
 
 int countPiecesBetween(const ChessBoard& board, int sx, int sy, int ex, int ey);
 
+<<<<<<< HEAD
 #ifdef CHESS_DEBUG_DECISION_TRACE
 std::string traceMoveString(const Move& move) {
     if (move.isInvalid()) {
@@ -29,6 +30,506 @@ std::string traceMoveString(const Move& move) {
     s += pgnint2char(move.target_x);
     s += int2char(move.target_y);
     return s;
+=======
+bool isNearOpponentKing(colorType side, int x, int y) {
+    if (side == RED) {
+        return y >= 7 && x >= 2 && x <= 6;
+    } else {
+        return y <= 2 && x >= 2 && x <= 6;
+    }
+}
+
+bool isPalacePressureMove(const ChessBoard& board, const Move& move, colorType side) {
+    const Grid source = board.getGridAt(move.source_x, move.source_y);
+    if (source.type != Rook && source.type != Cannon && source.type != Knight && source.type != Pawn) {
+        return false;
+    }
+    return isNearOpponentKing(side, move.target_x, move.target_y);
+}
+
+bool isLikelyZugzwangLike(const ChessBoard& board, colorType side) {
+    int rooks = 0, cannons = 0, knights = 0, pawns = 0;
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side) continue;
+            switch (g.type) {
+                case Rook: ++rooks; break;
+                case Cannon: ++cannons; break;
+                case Knight: ++knights; break;
+                case Pawn: ++pawns; break;
+                default: break;
+            }
+        }
+    }
+    return (rooks == 0 && cannons == 0 && knights <= 1) ||
+           (rooks == 0 && cannons <= 1 && pawns <= 2);
+}
+
+
+int clampInt(int value, int low, int high) {
+    return std::max(low, std::min(high, value));
+}
+
+int homeRank(colorType side) {
+    return side == RED ? 0 : 9;
+}
+
+int palaceMinRank(colorType side) {
+    return side == RED ? 0 : 7;
+}
+
+int palaceMaxRank(colorType side) {
+    return side == RED ? 2 : 9;
+}
+
+int forwardDir(colorType side) {
+    return side == RED ? 1 : -1;
+}
+
+int advanceOf(colorType side, int y) {
+    return side == RED ? y : (9 - y);
+}
+
+bool crossedRiver(colorType side, int y) {
+    return side == RED ? y >= 5 : y <= 4;
+}
+
+bool inPalace(colorType side, int x, int y) {
+    return x >= 3 && x <= 5 && y >= palaceMinRank(side) && y <= palaceMaxRank(side);
+}
+
+int initialCannonRank(colorType side) {
+    return side == RED ? 2 : 7;
+}
+
+int initialPawnRank(colorType side) {
+    return side == RED ? 3 : 6;
+}
+
+bool isInitialRookSquare(colorType side, int x, int y) {
+    return y == homeRank(side) && (x == 0 || x == 8);
+}
+
+bool isInitialKnightSquare(colorType side, int x, int y) {
+    return y == homeRank(side) && (x == 1 || x == 7);
+}
+
+bool isNormalKnightSquare(colorType side, int x, int y) {
+    return advanceOf(side, y) == 2 && (x == 2 || x == 6);
+}
+
+int flankIndexFromFile(int x) {
+    if (x <= 3) {
+        return 0;
+    }
+    if (x >= 5) {
+        return 1;
+    }
+    return -1;
+}
+
+bool onFlank(int x, int flank) {
+    return flank == 0 ? (x <= 3) : (x >= 5);
+}
+
+bool isDevelopedRook(colorType side, int x, int y) {
+    return advanceOf(side, y) >= 2 || x == 3 || x == 4 || x == 5;
+}
+
+bool isDevelopedKnight(colorType side, int x, int y) {
+    return !(y == homeRank(side) && (x == 1 || x == 7));
+}
+
+// 炮是否已经离开初始位置
+bool isDevelopedCannon(colorType side, int x, int y) {
+    const int cannonRow = initialCannonRank(side);
+    return !(y == cannonRow && (x == 1 || x == 7));
+}
+
+int countKnightJumpOptions(const ChessBoard& board, colorType side, int x, int y) {
+    int jumps = 0;
+    for (int d = 0; d < 8; ++d) {
+        const int tx = x + dx_knight[d];
+        const int ty = y + dy_knight[d];
+        if (!ChessBoard::inBoard(tx, ty)) {
+            continue;
+        }
+        const int footX = x + dx_knight_foot[d];
+        const int footY = y + dy_knight_foot[d];
+        if (board.getGridAt(footX, footY).color != EMPTY) {
+            continue;
+        }
+        if (board.getGridAt(tx, ty).color == side) {
+            continue;
+        }
+        ++jumps;
+    }
+    return jumps;
+}
+
+int countKnightForwardJumps(const ChessBoard& board, colorType side, int x, int y) {
+    int jumps = 0;
+    const int sourceAdvance = advanceOf(side, y);
+    for (int d = 0; d < 8; ++d) {
+        const int tx = x + dx_knight[d];
+        const int ty = y + dy_knight[d];
+        if (!ChessBoard::inBoard(tx, ty)) {
+            continue;
+        }
+        const int footX = x + dx_knight_foot[d];
+        const int footY = y + dy_knight_foot[d];
+        if (board.getGridAt(footX, footY).color != EMPTY) {
+            continue;
+        }
+        if (board.getGridAt(tx, ty).color == side) {
+            continue;
+        }
+        if (advanceOf(side, ty) > sourceAdvance) {
+            ++jumps;
+        }
+    }
+    return jumps;
+}
+
+int countKnightBlockedLegs(const ChessBoard& board, int x, int y) {
+    int blocked = 0;
+    if (ChessBoard::inBoard(x - 1, y) && board.getGridAt(x - 1, y).color != EMPTY) {
+        ++blocked;
+    }
+    if (ChessBoard::inBoard(x + 1, y) && board.getGridAt(x + 1, y).color != EMPTY) {
+        ++blocked;
+    }
+    if (ChessBoard::inBoard(x, y - 1) && board.getGridAt(x, y - 1).color != EMPTY) {
+        ++blocked;
+    }
+    if (ChessBoard::inBoard(x, y + 1) && board.getGridAt(x, y + 1).color != EMPTY) {
+        ++blocked;
+    }
+    return blocked;
+}
+
+int flankPawnAdvanceSteps(const ChessBoard& board, colorType side, int fileX) {
+    const int startAdvance = advanceOf(side, initialPawnRank(side));
+    int bestAdvance = startAdvance;
+    for (int y = 0; y < BOARDHEIGHT; ++y) {
+        const Grid g = board.getGridAt(fileX, y);
+        if (g.color == side && g.type == Pawn) {
+            bestAdvance = std::max(bestAdvance, advanceOf(side, y));
+        }
+    }
+    return std::max(0, bestAdvance - startAdvance);
+}
+
+bool flankPawnAdvanced(const ChessBoard& board, colorType side, int fileX) {
+    return flankPawnAdvanceSteps(board, side, fileX) >= 1;
+}
+
+bool flankPawnActivatesKnight(const ChessBoard& board, colorType side, int knightX, int knightY, int pawnFileX) {
+    if (!isNormalKnightSquare(side, knightX, knightY)) {
+        return false;
+    }
+    if (!flankPawnAdvanced(board, side, pawnFileX)) {
+        return false;
+    }
+    const int jumpCount = countKnightJumpOptions(board, side, knightX, knightY);
+    const int forwardJumps = countKnightForwardJumps(board, side, knightX, knightY);
+    return jumpCount >= 4 || forwardJumps >= 2;
+}
+
+bool isNaturalRookDevelopmentMove(colorType side, const Move& move) {
+    const int homeY = homeRank(side);
+    if (move.source_y != homeY) {
+        return false;
+    }
+
+    const bool fromCorner = (move.source_x == 0 || move.source_x == 8);
+    if (fromCorner) {
+        if (move.target_x == move.source_x && advanceOf(side, move.target_y) >= 1) {
+            return true;
+        }
+        if (move.target_y == homeY &&
+            (move.target_x == 1 || move.target_x == 7 || move.target_x == 3 || move.target_x == 5)) {
+            return true;
+        }
+    }
+
+    if (move.target_y == homeY && (move.target_x == 3 || move.target_x == 5)) {
+        return true;
+    }
+    if (move.target_x == move.source_x && advanceOf(side, move.target_y) >= 2) {
+        return true;
+    }
+    return false;
+}
+
+bool isMeaninglessEarlyRookShift(colorType side, const Move& move) {
+    if (move.source_y != homeRank(side) || move.target_y != homeRank(side)) {
+        return false;
+    }
+    if (isNaturalRookDevelopmentMove(side, move)) {
+        return false;
+    }
+    return move.source_x != move.target_x;
+}
+
+int rookFileQuality(const ChessBoard& board, colorType side, int fileX) {
+    bool ownPawn = false;
+    bool oppPawn = false;
+    const colorType opp = ChessBoard::oppColor(side);
+    for (int y = 0; y < BOARDHEIGHT; ++y) {
+        const Grid g = board.getGridAt(fileX, y);
+        if (g.type != Pawn) {
+            continue;
+        }
+        if (g.color == side) {
+            ownPawn = true;
+        } else if (g.color == opp) {
+            oppPawn = true;
+        }
+    }
+    if (!ownPawn && !oppPawn) {
+        return 2;
+    }
+    if (!ownPawn && oppPawn) {
+        return 1;
+    }
+    return 0;
+}
+
+int bishopDevelopmentReplyPotential(const ChessBoard& board, colorType side, int flank) {
+    int best = 0;
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side || g.type != Bishop) {
+                continue;
+            }
+            if (!onFlank(x, flank) && x != 4) {
+                continue;
+            }
+            for (int d = 0; d < 4; ++d) {
+                const int tx = x + dx_bishop[d];
+                const int ty = y + dy_bishop[d];
+                const int eyeX = x + dx_bishop_eye[d];
+                const int eyeY = y + dy_bishop_eye[d];
+                if (!ChessBoard::inBoard(tx, ty) || !ChessBoard::inColorArea(tx, ty, side)) {
+                    continue;
+                }
+                if (board.getGridAt(eyeX, eyeY).color != EMPTY || board.getGridAt(tx, ty).color != EMPTY) {
+                    continue;
+                }
+
+                int improve = 0;
+                if (std::abs(tx - 4) < std::abs(x - 4)) {
+                    improve += 6;
+                }
+                if (advanceOf(side, ty) > advanceOf(side, y)) {
+                    improve += 4;
+                }
+                if (tx == 4) {
+                    improve += 4;
+                }
+                best = std::max(best, improve);
+            }
+        }
+    }
+    return best;
+}
+
+int flankDefenseScore(const ChessBoard& board, colorType side, int flank) {
+    int score = 0;
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != side) {
+                continue;
+            }
+
+            const bool mainFlank = onFlank(x, flank);
+            switch (g.type) {
+                case Rook:
+                    score += mainFlank ? 6 : (x == 4 ? 2 : 0);
+                    break;
+                case Cannon:
+                    score += mainFlank ? 5 : (x == 4 ? 2 : 0);
+                    break;
+                case Knight:
+                    score += mainFlank ? 5 : (x == 4 ? 1 : 0);
+                    break;
+                case Bishop:
+                case Assistant:
+                    score += (mainFlank || x == 4) ? 2 : 0;
+                    break;
+                case Pawn:
+                    if (mainFlank) {
+                        score += crossedRiver(side, y) ? 2 : 1;
+                    }
+                    break;
+                case King:
+                    score += (x == 4 || mainFlank) ? 1 : 0;
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+    return score;
+}
+
+int weakerFlank(const ChessBoard& board, colorType defender) {
+    const int left = flankDefenseScore(board, defender, 0);
+    const int right = flankDefenseScore(board, defender, 1);
+    if (std::abs(left - right) < 3) {
+        return -1;
+    }
+    return left < right ? 0 : 1;
+}
+
+int attackTowardsWeakerFlankBonus(const ChessBoard& board, colorType attacker,
+                                  int x, int y, stoneType type) {
+    if (type != Rook && type != Knight && type != Cannon) {
+        return 0;
+    }
+
+    if (type == Rook && !isDevelopedRook(attacker, x, y)) {
+        return 0;
+    }
+    if (type == Knight && !isDevelopedKnight(attacker, x, y)) {
+        return 0;
+    }
+    if (type == Cannon && x != 4 && advanceOf(attacker, y) < 2) {
+        return 0;
+    }
+
+    const colorType defender = ChessBoard::oppColor(attacker);
+    const int weakFlank = weakerFlank(board, defender);
+    if (weakFlank < 0) {
+        return 0;
+    }
+
+    const int leftDefense = flankDefenseScore(board, defender, 0);
+    const int rightDefense = flankDefenseScore(board, defender, 1);
+    const int diff = std::abs(leftDefense - rightDefense);
+    const int pieceFlank = flankIndexFromFile(x);
+    const int base = (type == Rook) ? 14 : (type == Cannon ? 12 : 10);
+
+    if (pieceFlank < 0) {
+        if (x == 4 && (type == Rook || type == Cannon) && advanceOf(attacker, y) >= 2) {
+            return 4 + diff;
+        }
+        return 0;
+    }
+
+    if (pieceFlank == weakFlank) {
+        return base + diff * 2 + (advanceOf(attacker, y) >= 5 ? 4 : 0);
+    }
+    if (advanceOf(attacker, y) >= 4) {
+        return -(base / 2) - diff;
+    }
+    return 0;
+}
+
+bool cannonAttacksTargetOnLine(const ChessBoard& board, int cannonX, int cannonY, int targetX, int targetY) {
+    return ChessBoard::inSameStraightLine(cannonX, cannonY, targetX, targetY) &&
+           countPiecesBetween(board, cannonX, cannonY, targetX, targetY) == 1;
+}
+
+bool cannonPressesFlankKnight(const ChessBoard& board, colorType attacker, int cannonX, int cannonY, int flank) {
+    const colorType defender = ChessBoard::oppColor(attacker);
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != defender || g.type != Knight || !onFlank(x, flank)) {
+                continue;
+            }
+            if (cannonAttacksTargetOnLine(board, cannonX, cannonY, x, y)) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool cannonOnlyHarassesFlankPawn(const ChessBoard& board, colorType attacker, int cannonX, int cannonY, int flank) {
+    const colorType defender = ChessBoard::oppColor(attacker);
+    bool attacksFlankPawn = false;
+    for (int x = 0; x < BOARDWIDTH; ++x) {
+        for (int y = 0; y < BOARDHEIGHT; ++y) {
+            const Grid g = board.getGridAt(x, y);
+            if (g.color != defender || g.type != Pawn || !onFlank(x, flank)) {
+                continue;
+            }
+            if ((x == 2 || x == 6) && cannonAttacksTargetOnLine(board, cannonX, cannonY, x, y)) {
+                attacksFlankPawn = true;
+            }
+        }
+    }
+    if (!attacksFlankPawn) {
+        return false;
+    }
+    return !cannonPressesFlankKnight(board, attacker, cannonX, cannonY, flank);
+}
+
+int cannonNaturalReliefPenalty(ChessBoard& board, const Move& move, colorType side) {
+    const Grid source = board.getGridAt(move.source_x, move.source_y);
+    if (source.type != Cannon) {
+        return 0;
+    }
+
+    const int flank = flankIndexFromFile(move.target_x);
+    if (flank < 0 || advanceOf(side, move.target_y) < 3) {
+        return 0;
+    }
+
+    board.makeMoveAssumeLegal(move);
+    const colorType defender = board.currentColor();
+    const int bishopReply = bishopDevelopmentReplyPotential(board, defender, flank);
+    const bool pressesKnight = cannonPressesFlankKnight(board, side, move.target_x, move.target_y, flank);
+    const bool onlyHarassPawn = cannonOnlyHarassesFlankPawn(board, side, move.target_x, move.target_y, flank);
+
+    int penalty = 0;
+    if (pressesKnight) {
+        penalty += 120;
+        if (bishopReply >= 6) {
+            penalty += 220;
+        }
+    }
+    if (onlyHarassPawn) {
+        penalty += 140;
+        if (bishopReply >= 4) {
+            penalty += 140;
+        }
+    }
+    if (!isCannonMoveUseful(board, move, side, 256) && bishopReply > 0) {
+        penalty += 80 + bishopReply * 5;
+    }
+
+    board.undoMove();
+    return penalty;
+}
+
+bool isClassicWocaoSquare(colorType defender, int x, int y) {
+    if (defender == RED) {
+        return ((x == 3 || x == 5) && y == 2) || ((x == 2 || x == 6) && y == 1);
+    }
+    return ((x == 3 || x == 5) && y == 7) || ((x == 2 || x == 6) && y == 8);
+}
+
+bool isClassicShijiaoSquare(colorType defender, int x, int y) {
+    if (defender == RED) {
+        return y == 2 && (x == 2 || x == 6);
+    }
+    return y == 7 && (x == 2 || x == 6);
+}
+
+bool isBacktrack(const Move& newer, const Move& older) {
+    return !older.isInvalid() &&
+           newer.source_x == older.target_x &&
+           newer.source_y == older.target_y &&
+           newer.target_x == older.source_x &&
+           newer.target_y == older.source_y;
+>>>>>>> e245d4fd2f2e841ccd464b6021883e39622670c6
 }
 #endif
 
@@ -1567,6 +2068,7 @@ void AIPlayer::initSearchState() const {
     }
 }
 
+<<<<<<< HEAD
 int AIPlayer::elapsedMs() const {
     const auto now = std::chrono::steady_clock::now();
     return static_cast<int>(
@@ -1603,6 +2105,23 @@ void AIPlayer::allocateTimeBudget(const ChessBoard&, int rootMoveCount) const {
     hardTimeMs_ = std::max(HARD_TIME_MIN_MS, std::min(HARD_TIME_MAX_MS, hard));
     allocatedTimeMs_ = hardTimeMs_;
 }
+=======
+// =====================================================================
+// QSearch：将军扩展与局面危险阶段挂钩
+// =====================================================================
+int AIPlayer::scoreQSearchCheckingMove(const ChessBoard& board, const Move& move,
+                                       int qsDepth, int standPat, int alpha,
+                                       int oppDangerLevel) const {
+    if (qsDepth > 0) {
+        return -INF_SCORE;
+    }
+    if (oppDangerLevel < 30 && standPat + 120 < alpha) {
+        return -INF_SCORE;
+    }
+    if (standPat + 80 < alpha) {
+        return -INF_SCORE;
+    }
+>>>>>>> e245d4fd2f2e841ccd464b6021883e39622670c6
 
 bool AIPlayer::shouldStopForNextDepth(int depth, int) const {
     if (timeUp_) return true;
@@ -1623,6 +2142,7 @@ int AIPlayer::repValue(int repStatus, int ply) const {
     if (repStatus == REP_LOSS) {
         return ply - BAN_SCORE;
     }
+<<<<<<< HEAD
     if (repStatus == REP_WIN) {
         return BAN_SCORE - ply;
     }
@@ -1685,6 +2205,61 @@ void AIPlayer::orderMoves(const ChessBoard& board,
         for (int j = i + 1; j < n; ++j) {
             if (scores[j] > scores[best]) {
                 best = j;
+=======
+
+    int oppKingX = -1, oppKingY = -1;
+    board.findKing(board.oppColor(), oppKingX, oppKingY);
+
+    int sc = 2500 + pieceBaseValue(source.type);
+
+    if (oppDangerLevel >= 80) sc += 700;
+    else if (oppDangerLevel >= 60) sc += 450;
+    else if (oppDangerLevel >= 30) sc += 180;
+
+    if (oppKingX >= 0) {
+        const int dist = std::abs(move.target_x - oppKingX) + std::abs(move.target_y - oppKingY);
+        if (dist <= 3) {
+            sc += (4 - dist) * 140;
+        }
+
+        if (source.type == Rook) {
+            if (move.target_x == oppKingX &&
+                countPiecesBetween(board, move.target_x, move.target_y, oppKingX, oppKingY) == 0) {
+                sc += 300;
+                for (int fx = 0; fx < BOARDWIDTH; ++fx) {
+                    if (fx == move.target_x) continue;
+                    const Grid tg = board.getGridAt(fx, move.target_y);
+                    if (tg.color == board.oppColor() &&
+                        (tg.type == Rook || tg.type == Cannon || tg.type == Knight)) {
+                        sc += 700;
+                        break;
+                    }
+                }
+>>>>>>> e245d4fd2f2e841ccd464b6021883e39622670c6
+            }
+            if (move.target_y == oppKingY &&
+                countPiecesBetween(board, move.target_x, move.target_y, oppKingX, oppKingY) == 0) {
+                sc += 300;
+            }
+        }
+
+        if (source.type == Cannon) {
+            if (move.target_x == oppKingX) {
+                int between = countPiecesBetween(board, move.target_x, move.target_y, oppKingX, oppKingY);
+                if (between == 1) sc += 650;
+                else if (between == 0) sc += 420;
+            }
+            if (move.target_y == oppKingY) {
+                int between = countPiecesBetween(board, move.target_x, move.target_y, oppKingX, oppKingY);
+                if (between == 1) sc += 550;
+            }
+        }
+
+        if (source.type == Knight) {
+            const int dx = std::abs(move.target_x - oppKingX);
+            const int dy = std::abs(move.target_y - oppKingY);
+            if ((dx == 2 && dy == 1) || (dx == 1 && dy == 2)) {
+                sc += 420;
             }
         }
         if (best != i) {
@@ -1836,16 +2411,35 @@ int AIPlayer::quiescence(ChessBoard& board, int alpha, int beta,
 
     const bool inCheck = board.isInCheck();
 
+<<<<<<< HEAD
     if (qsDepth >= MAX_QS_DEPTH || ply >= MAX_DEPTH - 1) {
         if (inCheck) {
             Move legalMoves[EYE_MAX_MOVES];
             if (board.generateMovesFast(legalMoves, false) == 0) {
                 return -MATE_SCORE + ply;
+=======
+        // 只在 qsDepth==0 时考虑非吃子将军步，且受局面危险控制
+                if (qsDepth == 0 && standPat + 96 >= alpha) {
+            const KingDangerInfo oppDanger = analyzeKingDanger(board, board.oppColor());
+            const int oppDangerLevel = oppDanger.totalDanger;
+            const int enemyDeep = countEnemyDeepMajors(board, board.currentColor());
+
+            int maxChecks = MAX_QS_CHECKS;
+            if (oppDangerLevel < 20 && enemyDeep == 0) {
+                maxChecks = 1;
+            } else if (oppDangerLevel < 35 && enemyDeep < 2) {
+                maxChecks = 2;
+            } else if (oppDangerLevel < 60) {
+                maxChecks = 4;
+            } else {
+                maxChecks = 6;
+>>>>>>> e245d4fd2f2e841ccd464b6021883e39622670c6
             }
         }
         return evaluate(board, alpha, beta);
     }
 
+<<<<<<< HEAD
     int best = -MATE_SCORE;
 
     if (!inCheck) {
@@ -1856,6 +2450,30 @@ int AIPlayer::quiescence(ChessBoard& board, int alpha, int beta,
         best = standPat;
         if (standPat > alpha) {
             alpha = standPat;
+=======
+            std::vector<Move> allMoves;
+            board.generateMoves(allMoves);
+            std::vector<std::pair<int, Move>> checkingMoves;
+            checkingMoves.reserve(allMoves.size());
+
+            for (const auto& mv : allMoves) {
+                if (board.isCapture(mv)) continue;
+                const int sc = scoreQSearchCheckingMove(board, mv, qsDepth, standPat, alpha, oppDangerLevel);
+                if (sc > 0) {
+                    checkingMoves.push_back(std::make_pair(sc, mv));
+                }
+            }
+
+            std::sort(checkingMoves.begin(), checkingMoves.end(), [](const auto& lhs, const auto& rhs) {
+                return lhs.first > rhs.first;
+            });
+
+            int added = 0;
+            for (const auto& item : checkingMoves) {
+                moves.push_back(item.second);
+                if (++added >= maxChecks) break;
+            }
+>>>>>>> e245d4fd2f2e841ccd464b6021883e39622670c6
         }
     }
 
@@ -2086,10 +2704,61 @@ int AIPlayer::searchPVFast(ChessBoard& board, int alpha, int beta, int depth,
         if (iidLen > 0) {
             ttMove = iidBuf[0];
         }
+<<<<<<< HEAD
         if (timeUp_) {
             return 0;
+=======
+    }
+
+    const colorType side = board.currentColor();
+const KingDangerInfo selfDanger = analyzeKingDanger(board, side);
+const bool nullUnsafe =
+    isLikelyZugzwangLike(board, side) ||
+    selfDanger.totalDanger >= 70 ||
+    selfDanger.directRookPressure > 0 ||
+    selfDanger.directCannonPressure > 0 ||
+    selfDanger.bottomCannonThreat > 0 ||
+    selfDanger.rookCannonThreat > 0 ||
+    selfDanger.wocaoThreat > 0 ||
+    countEnemyDeepMajors(board, side) >= 2;
+
+if (allowNull && !pvNode && !inCheck &&
+    depth >= NULL_MOVE_MIN_DEPTH &&
+    board.countMajorPieces(board.currentColor()) >= 4 &&
+    !nullUnsafe) {
+    int reduction = 2 + (depth >= 6 ? 1 : 0) + (depth >= 10 ? 1 : 0);
+
+    // 局面危险时宁可少减一点，降低误剪风险
+    if (selfDanger.totalDanger >= 45) {
+        reduction = std::max(1, reduction - 1);
+    }
+
+    if (reduction > depth - 1) {
+        reduction = depth - 1;
+    }
+
+    board.makeNullMove();
+    const int nullScore = -alphaBeta(board, depth - 1 - reduction, -beta, -beta + 1,
+                                     ply + 1, false, !cutNode);
+    board.undoNullMove();
+
+    if (timeUp_) {
+        return 0;
+    }
+
+    if (nullScore >= beta) {
+        // 深层时保留验证搜索，但在危险局面下更谨慎
+        if (depth >= 8 || selfDanger.totalDanger >= 45) {
+            const int verify = alphaBeta(board, depth - 1 - reduction, alpha, beta, ply, false, false);
+            if (verify >= beta) {
+                return beta;
+            }
+        } else {
+            return beta;
+>>>>>>> e245d4fd2f2e841ccd464b6021883e39622670c6
         }
     }
+}
 
     auto goodCapture = [&](const Move& mv) -> bool {
         return board.isCapture(mv);
@@ -2132,10 +2801,40 @@ int AIPlayer::searchPVFast(ChessBoard& board, int alpha, int beta, int depth,
             sc = -searchPVFast(board, -beta, -alpha, newDepth, ply + 1, childBuf, childLen);
             firstLegalMove = false;
         } else {
+<<<<<<< HEAD
             sc = -searchCut(board, -alpha, newDepth, ply + 1, false);
             if (!timeUp_ && sc > alpha && sc < beta) {
                 childLen = 0;
                 sc = -searchPVFast(board, -beta, -alpha, newDepth, ply + 1, childBuf, childLen);
+=======
+            int newDepth = depth - 1;
+                        const bool palacePressure = isPalacePressureMove(board, mv, source.color);
+            const bool tacticalEscape =
+                (source.type == Rook || source.type == Cannon || source.type == Knight) &&
+                const_cast<ChessBoard&>(board).attacked(ChessBoard::oppColor(source.color),
+                                                        mv.source_x, mv.source_y);
+            const int phase = endgamePhase(board);
+            if (!inCheck && !isCapture && !givesCheck && !palacePressure && !tacticalEscape &&
+                depth >= LMR_MIN_DEPTH && movesSearched >= LMR_MIN_MOVES) {
+                int reduction = lmrTable[std::min(depth, 63)][std::min(movesSearched, 63)];
+                if (cutNode) {
+                    ++reduction;
+                }
+                if (pvNode) {
+                    reduction = std::max(0, reduction - 1);
+                }
+                if (source.type == King || source.type == Assistant || source.type == Bishop) {
+                    reduction = std::max(0, reduction - 1);
+                }
+                if (phase < 110) {
+                    reduction = std::max(0, reduction - 1);
+                }
+                newDepth = std::max(1, depth - 1 - reduction);
+            }
+            sc = -alphaBeta(board, newDepth, -(alpha + 1), -alpha, ply + 1, true, !cutNode);
+            if (sc > alpha && (newDepth < depth - 1 || !pvNode)) {
+                sc = -alphaBeta(board, depth - 1, -beta, -alpha, ply + 1, true, false);
+>>>>>>> e245d4fd2f2e841ccd464b6021883e39622670c6
             }
         }
 
